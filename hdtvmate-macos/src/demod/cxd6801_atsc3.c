@@ -61,6 +61,17 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
 
     LOG_DBG("SLtoAA3: applying mode transition registers...");
 
+    /* SetALPClockModeAndFreq - must be called before mode transition.
+     * From Ghidra decompile at 0xe8820:
+     * Bank 0x00: reg 0x32=0, reg 0x33=clock_divider, reg 0x32=1 (clock enable)
+     * Bank 0x95: reg 0x11=0x60 (ALP clock frequency) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x33, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+
     /* SLVX bank 0x00: reg 0x17 = 0x0E (enable ATSC3 clock) */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0E);
     if (ret != HDTVMATE_OK) return ret;
@@ -95,6 +106,10 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x11, 0x33, data, 3);
         if (ret != HDTVMATE_OK) return ret;
     }
+
+    /* SLVT bank 0x95: ALP clock freq from SetALPClockModeAndFreq */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x11, 0x60);
+    if (ret != HDTVMATE_OK) return ret;
 
     /* SLVT bank 0x95: reg 0x79 = 0x10 */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x79, 0x10);
@@ -227,11 +242,35 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return ret;
     }
 
-    /* Step 4: TuneEnd - SoftReset to start acquisition
-     * NOTE: SoftReset appears to reset sync state. Testing without it
-     * showed syncStat=1. The BandSetting registers are likely needed
-     * for full lock. Skip SoftReset for now. */
-    /* ret = cxd6801_atsc3_tune_end(dev); */
+    /* Step 4: TuneEnd - SoftReset to trigger acquisition sequence */
+    ret = cxd6801_atsc3_tune_end(dev);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* Step 5: Re-apply BandSetting AFTER SoftReset
+     * SoftReset clears some registers, so rewrite critical ones */
+    {
+        /* Bank 0x90: nominalRate for 6MHz */
+        uint8_t nominalRate[5] = {0x1B, 0xC7, 0x1C, 0x71, 0xC7};
+        cxd6801_i2c_write(&dev->i2c_demod, 0x90, 0x9F, nominalRate, 5);
+
+        /* Bank 0x10: ITB coefficients */
+        uint8_t itbCoef[14] = {
+            0x31, 0xA8, 0x29, 0x9B, 0x27, 0x9C, 0x28,
+            0x9E, 0x29, 0xA4, 0x29, 0xA2, 0x29, 0xA8
+        };
+        cxd6801_i2c_write(&dev->i2c_demod, 0x10, 0xA6, itbCoef, 14);
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xD7, 0x04);
+
+        /* Bank 0x1D: filter data */
+        uint8_t filterData[10] = {
+            0x01, 0x1E, 0xC3, 0x3E, 0xC2, 0x79, 0x84, 0x1E, 0xC3, 0x3E
+        };
+        cxd6801_i2c_write(&dev->i2c_demod, 0x1D, 0xBF, filterData, 10);
+
+        /* Bank 0x99: */
+        uint8_t data4[4] = {0xDE, 0x39, 0x0D, 0xE4};
+        cxd6801_i2c_write(&dev->i2c_demod, 0x99, 0x89, data4, 4);
+    }
 
     dev->state = CXD6801_STATE_ACTIVE_ATSC3;
     dev->frequency_khz = frequency_khz;
