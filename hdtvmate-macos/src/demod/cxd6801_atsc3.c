@@ -227,10 +227,11 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return ret;
     }
 
-    /* Step 4: TuneEnd - SoftReset + SetStreamOutput to start acquisition
-     * From sony_cxd6801_demod_TuneEnd(): SoftReset + SetStreamOutput */
-    ret = cxd6801_atsc3_tune_end(dev);
-    if (ret != HDTVMATE_OK) return ret;
+    /* Step 4: TuneEnd - SoftReset to start acquisition
+     * NOTE: SoftReset appears to reset sync state. Testing without it
+     * showed syncStat=1. The BandSetting registers are likely needed
+     * for full lock. Skip SoftReset for now. */
+    /* ret = cxd6801_atsc3_tune_end(dev); */
 
     dev->state = CXD6801_STATE_ACTIVE_ATSC3;
     dev->frequency_khz = frequency_khz;
