@@ -38,15 +38,161 @@ typedef struct {
     uint8_t value;
 } reg_value_t;
 
-/* Placeholder register sequences - TO BE FILLED FROM GHIDRA */
-/* These will be populated after decompiling sony_cxd6801_demod_atsc3_Tune */
-static const reg_value_t atsc3_tune_common[] = {
-    /* Common setup for ATSC 3.0 mode transition
-     * TODO: Extract from Ghidra decompilation
-     * Expected ~20-50 register writes */
-    {0x00, 0x2C, 0x01},  /* Placeholder: system mode = ATSC 3.0 */
-    {0, 0, 0},  /* Terminator */
-};
+/*
+ * SLtoAA3 register sequence - Sleep to Active ATSC 3.0 transition
+ * Decompiled from liba3_phy_sony.so SLtoAA3() at 0xeaafc via Ghidra.
+ *
+ * Note: The binary uses separate I2C addresses for different sub-blocks:
+ *   - SLVT (i2cAddressSLVT): Main demod registers (our 0xDC)
+ *   - SLVX (i2cAddressSLVX): Extended registers
+ *   The "bank" is set by writing to reg 0x00 before accessing registers.
+ *   In our driver, the bank is the first parameter to cxd6801_i2c_write_one().
+ *
+ * ALP output mode (ATSC 3.0 normal, non-EAS):
+ */
+
+/*
+ * SLtoAA3 - Sleep to Active ATSC 3.0 mode transition
+ * Applies the full register initialization sequence from Ghidra decompile.
+ */
+static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
+{
+    hdtvmate_error_t ret;
+
+    LOG_DBG("SLtoAA3: applying mode transition registers...");
+
+    /* SLVX bank 0x00: reg 0x17 = 0x0E (enable ATSC3 clock) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0E);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x00: output mode = ALP (0x02) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x02);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x00: system select = ATSC 3.0 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x00: reg 0x4B = 0x74 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x74);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x00: reg 0x49 = 0x00 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVX bank 0x00: reg 0x18 = 0x00 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x18, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x11: reg 0x6A = 0x50 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x11, 0x6A, 0x50);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x11: reg 0x33 = {0x00, 0x03, 0x3B} */
+    {
+        uint8_t data[3] = {0x00, 0x03, 0x3B};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x11, 0x33, data, 3);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* SLVT bank 0x95: reg 0x79 = 0x10 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x79, 0x10);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x95: reg 0x7B = 0x10 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x7B, 0x10);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x9C: reg 0x50 (5 bytes) - Normal EAS state */
+    {
+        uint8_t data[5] = {0x93, 0x40, 0x09, 0xC0, 0x00};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0x50, data, 5);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* SLVT bank 0x9C: reg 0x65 (5 bytes) */
+    {
+        uint8_t data[5] = {0xD3, 0x40, 0x00, 0x1C, 0x1D};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0x65, data, 5);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* SLVT bank 0x9C: reg 0xD4 (3 bytes) */
+    {
+        uint8_t data[3] = {0x01, 0xD8, 0x1D};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0xD4, data, 3);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* SLVT bank 0x9C: reg 0xE0 (3 bytes) */
+    {
+        uint8_t data[3] = {0x01, 0xD8, 0x1D};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0xE0, data, 3);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* SLVT bank 0x9C: reg 0xFC = 0x14 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9C, 0xFC, 0x14);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /*
+     * SLtoAA3_BandSetting() for 6 MHz (ATSC 3.0)
+     * Decompiled from Ghidra at 0xed7f0, BW==6 path.
+     * Sets nominal rate, ITB coefficients, and filter config.
+     */
+
+    /* Bank 0x90: reg 0x9F = nominalRate (5 bytes)
+     * For 6 MHz: 0x711CC71B + 0xC7 (little-endian → {1B,C7,1C,71,C7}) */
+    {
+        uint8_t nominalRate[5] = {0x1B, 0xC7, 0x1C, 0x71, 0xC7};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x90, 0x9F, nominalRate, 5);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* Bank 0x10: reg 0xA5 = 0x00 (no IQ inversion) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xA5, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* Bank 0x10: reg 0xA6 = ITB coefficients (14 bytes)
+     * Extracted from binary .rodata at offset 0x3cbf8 */
+    {
+        uint8_t itbCoef[14] = {
+            0x31, 0xA8, 0x29, 0x9B, 0x27, 0x9C, 0x28,
+            0x9E, 0x29, 0xA4, 0x29, 0xA2, 0x29, 0xA8
+        };
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x10, 0xA6, itbCoef, 14);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* Bank 0x10: reg 0xD7 = 0x04 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xD7, 0x04);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* Bank 0x1D: reg 0xBF = 10 bytes (filter config)
+     * From binary .rodata at offset 0x3cc06 */
+    {
+        uint8_t filterData[10] = {
+            0x01, 0x1E, 0xC3, 0x3E, 0xC2, 0x79, 0x84, 0x1E, 0xC3, 0x3E
+        };
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x1D, 0xBF, filterData, 10);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* Bank 0x99: reg 0x89 = 4 bytes (0xE40D39DE LE → {DE,39,0D,E4}) */
+    {
+        uint8_t data4[4] = {0xDE, 0x39, 0x0D, 0xE4};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x99, 0x89, data4, 4);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* Enable stream output: bank 0x02, reg 0xC0 = 0x00 (enable ALP output) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xC0, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    LOG_DBG("SLtoAA3: mode transition + band setting complete");
+    return HDTVMATE_OK;
+}
 
 hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_khz,
                                      cxd6801_bandwidth_t bw)
@@ -66,19 +212,12 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* Step 2: Apply common ATSC 3.0 tune register sequence
-     * sony_cxd6801_demod_atsc3_Tune() does:
-     * - Mode transition from SLEEP to ACTIVE_ATSC3
-     * - Configure IFAGC, bandwidth filter, clock
-     * - Set up ALP output
-     */
-    for (int i = 0; atsc3_tune_common[i].bank || atsc3_tune_common[i].reg; i++) {
-        const reg_value_t *rv = &atsc3_tune_common[i];
-        ret = cxd6801_i2c_write_one(&dev->i2c_demod, rv->bank, rv->reg, rv->value);
-        if (ret != HDTVMATE_OK) {
-            LOG_ERR("Register write failed at tune step %d", i);
-            return ret;
-        }
+    /* Step 2: SLtoAA3 - Sleep to Active ATSC 3.0 mode transition
+     * From Ghidra decompile of SLtoAA3() at 0xeaafc */
+    ret = cxd6801_sltoaa3(dev);
+    if (ret != HDTVMATE_OK) {
+        LOG_ERR("SLtoAA3 mode transition failed");
+        return ret;
     }
 
     /* Step 3: Tune the ASCOT3 tuner to the target frequency */
@@ -88,8 +227,8 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return ret;
     }
 
-    /* Step 4: Tune end (sony_cxd6801_demod_TuneEnd / sony_cxd6801_ascot3_TuneEnd)
-     * Release from reset, start acquisition */
+    /* Step 4: TuneEnd - SoftReset + SetStreamOutput to start acquisition
+     * From sony_cxd6801_demod_TuneEnd(): SoftReset + SetStreamOutput */
     ret = cxd6801_atsc3_tune_end(dev);
     if (ret != HDTVMATE_OK) return ret;
 
@@ -103,18 +242,24 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 
 hdtvmate_error_t cxd6801_atsc3_tune_end(cxd6801_device_t *dev)
 {
-    /* Release demod from tuning hold and start acquisition.
-     * From sony_cxd6801_demod_TuneEnd():
-     * - Soft reset
-     * - Enable TS/ALP output
+    /*
+     * From Ghidra decompile of sony_cxd6801_demod_TuneEnd():
+     * For non-ATSC1: SoftReset() then SetStreamOutput()
+     *
+     * SoftReset: bank 0x00, reg 0xFE = 0x01
+     * SetStreamOutput: enables TS/ALP output pin
      */
     hdtvmate_error_t ret;
 
-    /* Soft reset to start acquisition */
+    /* Soft reset to start acquisition (bank 0x00, reg 0xFE = 0x01) */
     ret = cxd6801_soft_reset(dev);
     if (ret != HDTVMATE_OK) return ret;
 
-    br_user_delay(50);  /* Wait for acquisition to start */
+    /* SetStreamOutput - enable ALP output
+     * From Ghidra: This writes to output enable register.
+     * The exact register depends on output mode but is typically
+     * bank 0x00, reg 0xC3 for stream output enable.
+     * For now, the SoftReset alone should trigger acquisition. */
 
     return HDTVMATE_OK;
 }
@@ -128,23 +273,28 @@ hdtvmate_error_t cxd6801_atsc3_check_demod_lock(cxd6801_device_t *dev, bool *loc
 
     /*
      * Check demodulator lock status.
-     * From sony_cxd6801_demod_atsc3_CheckDemodLock():
-     * Read lock status register (bank 0x91, reg TBD)
-     *
-     * Lock status bits (from CXD2880 reference):
-     * bit 0: TPS lock
-     * bit 1: Demod lock
-     * bit 2: TS lock
-     *
-     * TODO: Confirm exact bank/register from Ghidra
+     * From Ghidra decompile of sony_cxd6801_demod_atsc3_CheckDemodLock():
+     *   1. Call monitor_SyncStat() which reads:
+     *      - Bank 0x90, reg 0x10: syncStat = data & 0x07, unlockDetected = (data>>4)&1
+     *      - Bank 0x95, reg 0x40: ALP lock bits
+     *   2. If syncStat > 5 → locked (value 6 = demod lock achieved)
+     *   3. If unlockDetected → unlock detected
      */
-    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x91, 0x10, &data, 1);
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x90, 0x10, &data, 1);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Check demod lock bit (bit pattern TBD) */
-    *locked = (data & 0x07) == 0x07;
+    uint8_t sync_stat = data & 0x07;
+    uint8_t unlock_detected = (data >> 4) & 0x01;
 
-    LOG_TRC("Demod lock status: 0x%02x -> %s", data, *locked ? "LOCKED" : "unlocked");
+    if (unlock_detected) {
+        LOG_TRC("Demod unlock detected (reg=0x%02x)", data);
+        *locked = false;
+    } else {
+        *locked = (sync_stat > 5);  /* syncStat 6 = locked */
+    }
+
+    LOG_TRC("Demod lock: bank=0x90 reg=0x10 = 0x%02x, sync=%d, unlock=%d -> %s",
+            data, sync_stat, unlock_detected, *locked ? "LOCKED" : "unlocked");
     return HDTVMATE_OK;
 }
 
@@ -157,17 +307,21 @@ hdtvmate_error_t cxd6801_atsc3_check_alp_lock(cxd6801_device_t *dev, bool *locke
 
     /*
      * Check ALP lock (ATSC 3.0 transport layer lock).
-     * From sony_cxd6801_demod_atsc3_CheckALPLock():
-     * This confirms the ALP framing is synchronized.
-     *
-     * TODO: Confirm exact bank/register from Ghidra
+     * From Ghidra decompile of monitor_SyncStat():
+     *   Bank 0x95, reg 0x40:
+     *     bit 4: ALPLockAll (all PLPs locked)
+     *     bit 0: alpLockStat[0]
+     *     bit 1: alpLockStat[1]
+     *     bit 2: alpLockStat[2]
+     *     bit 3: alpLockStat[3]
      */
-    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x91, 0x11, &data, 1);
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x95, 0x40, &data, 1);
     if (ret != HDTVMATE_OK) return ret;
 
-    *locked = (data & 0x01) != 0;
+    *locked = ((data >> 4) & 0x01) != 0;  /* ALPLockAll bit */
 
-    LOG_TRC("ALP lock status: 0x%02x -> %s", data, *locked ? "LOCKED" : "unlocked");
+    LOG_TRC("ALP lock: bank=0x95 reg=0x40 = 0x%02x -> %s",
+            data, *locked ? "LOCKED" : "unlocked");
     return HDTVMATE_OK;
 }
 

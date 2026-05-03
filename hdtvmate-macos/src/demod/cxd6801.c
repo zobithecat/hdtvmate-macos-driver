@@ -34,9 +34,12 @@ hdtvmate_error_t cxd6801_create(cxd6801_device_t *dev, it9300_device_t *bridge,
     dev->state = CXD6801_STATE_UNKNOWN;
 
     /* I2C addresses confirmed by bus scan:
-     * Bus=3, Demod=0xC8, Tuner=0xC2 */
+     * Bus=3, Demod=0xC8
+     * ASCOT3 tuner is INTEGRATED in CXD6801 — accessed via same demod I2C
+     * (not a separate I2C slave). Tuner registers are in a separate bank
+     * accessed through demod's register space. */
     uint8_t demod_addr = CXD6801_I2C_ADDR_DEMOD;  /* 0xC8 */
-    uint8_t tuner_addr = CXD6801_I2C_ADDR_TUNER;  /* 0xC2 */
+    uint8_t tuner_addr = CXD6801_I2C_ADDR_DEMOD;  /* Same as demod! Integrated tuner */
 
     cxd6801_i2c_init(&dev->i2c_demod, bridge, chip_idx, demod_addr, chip_idx);
     cxd6801_i2c_init(&dev->i2c_tuner, bridge, chip_idx, tuner_addr, chip_idx);
@@ -80,23 +83,13 @@ hdtvmate_error_t cxd6801_read_chip_id(cxd6801_device_t *dev)
              ((uint16_t)(reg_fb & 0x03) << 8) | reg_fd);
     dev->chip_id = ((uint16_t)(reg_fb & 0x03) << 8) | reg_fd;
 
-    /* If chip_id not recognized, try alternative I2C addresses */
-    if (dev->chip_id != CXD6801_CHIP_ID && dev->chip_id != CXD6802_CHIP_ID) {
-        static const uint8_t try_addrs[] = {0xC8, 0xCA, 0xD8, 0xDA};
-        for (int a = 0; a < 4; a++) {
-            if (try_addrs[a] == dev->i2c_demod.i2c_addr) continue;
-            dev->i2c_demod.i2c_addr = try_addrs[a];
-            cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xFB, &reg_fb, 1);
-            cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xFD, &reg_fd, 1);
-            uint16_t alt_id = ((uint16_t)(reg_fb & 0x03) << 8) | reg_fd;
-            LOG_INFO("  Try addr 0x%02x: 0xFB=0x%02x, 0xFD=0x%02x => 0x%04x",
-                     try_addrs[a], reg_fb, reg_fd, alt_id);
-            if (alt_id == CXD6801_CHIP_ID || alt_id == CXD6802_CHIP_ID) {
-                dev->chip_id = alt_id;
-                LOG_INFO("  MATCH! Using I2C addr 0x%02x", try_addrs[a]);
-                break;
-            }
-        }
+    /* Chip ID 0x0396 is the actual CXD6801 silicon revision.
+     * The CXD6801_CHIP_ID (0x6801) was a guess from CXD2880 patterns.
+     * Accept 0x0396 as valid. */
+    if (dev->chip_id == 0x0396) {
+        LOG_INFO("Chip ID 0x0396 accepted (CXD6801 confirmed via bus scan)");
+    } else if (dev->chip_id != CXD6801_CHIP_ID && dev->chip_id != CXD6802_CHIP_ID) {
+        LOG_WARN("Unexpected chip ID: 0x%04x", dev->chip_id);
     }
     LOG_INFO("Chip ID: 0x%04x (%s)", dev->chip_id,
              dev->chip_id == CXD6801_CHIP_ID ? "CXD6801" :
@@ -137,17 +130,13 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
      * The following is a framework based on CXD2880 patterns.
      */
 
-    /* Step 1: Software reset */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x10, 0x01);
+    /* Step 1: Software reset (bank 0x00, reg 0xFE = 0x01, confirmed from Ghidra) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xFE, 0x01);
     if (ret != HDTVMATE_OK) {
         LOG_ERR("Software reset failed");
         return ret;
     }
     br_user_delay(10);
-
-    /* Step 2: Set to sleep mode first */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x10, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
 
     /*
      * Step 3: Configure ALP/TS clock mode
@@ -208,8 +197,11 @@ hdtvmate_error_t cxd6801_shutdown(cxd6801_device_t *dev)
 
 hdtvmate_error_t cxd6801_soft_reset(cxd6801_device_t *dev)
 {
-    /* sony_cxd6801_demod_SoftReset */
-    return cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x10, 0x01);
+    /* sony_cxd6801_demod_SoftReset (confirmed from Ghidra):
+     * Bank 0x00, reg 0xFE = 0x01 */
+    hdtvmate_error_t ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xFE, 0x01);
+    return ret;
 }
 
 /* High-level channel acquisition */

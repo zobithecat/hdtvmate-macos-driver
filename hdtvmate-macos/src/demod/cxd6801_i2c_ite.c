@@ -84,20 +84,45 @@ static hdtvmate_error_t cxd6801_i2c_select_bank(cxd6801_i2c_t *i2c, uint8_t bank
 }
 
 /*
- * Read registers from CXD6801
- * ALL operations use READ address (0xDC) - confirmed by testing!
+ * Read registers from CXD6801 demod or tuner.
+ *
+ * Demod: bank select + reg set + read, all via 0xDC.
+ * Tuner: write reg addr to tuner I2C, then read from tuner+1 (read addr).
  */
 hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
                                    uint8_t reg, uint8_t *data, uint8_t len)
 {
     hdtvmate_error_t ret;
+    uint8_t tx_reg[64];
 
-    /* Step 1: Select bank via 0xDC */
+    /* Tuner access: write reg addr, then read from tuner addr+1 */
+    if (i2c->i2c_addr != CXD6801_I2C_ADDR_DEMOD &&
+        i2c->i2c_addr != CXD6801_I2C_ADDR_WRITE) {
+        /* Write register address to tuner */
+        tx_reg[0] = 1;
+        tx_reg[1] = i2c->i2c_bus;
+        tx_reg[2] = i2c->i2c_addr;  /* tuner write addr (0xC2) */
+        tx_reg[3] = reg;
+        ret = br_cmd_send(i2c->bridge, 0x002B, tx_reg, 4, NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
+
+        /* Read from tuner (addr+1 for read, or same addr on some devices) */
+        tx_reg[0] = len;
+        tx_reg[1] = i2c->i2c_bus;
+        tx_reg[2] = i2c->i2c_addr | 0x01;  /* tuner read addr (0xC3) */
+        ret = br_cmd_send(i2c->bridge, 0x002A, tx_reg, 3, data, len);
+
+        LOG_DBG("I2C tuner read: addr=0x%02x reg=0x%02x len=%d data=%02x -> %s",
+                i2c->i2c_addr, reg, len,
+                len > 0 ? data[0] : 0,
+                (ret == HDTVMATE_OK) ? "OK" : "FAIL");
+        return ret;
+    }
+
+    /* Demod: bank select + register address + read, all via 0xDC */
     ret = cxd6801_i2c_select_bank(i2c, bank);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Step 2: Set register address via 0xDC */
-    uint8_t tx_reg[64];
     tx_reg[0] = 1;
     tx_reg[1] = i2c->i2c_bus;
     tx_reg[2] = CXD6801_I2C_ADDR_READ;
@@ -105,7 +130,6 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
     ret = br_cmd_send(i2c->bridge, 0x002B, tx_reg, 4, NULL, 0);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Step 3: Read data via 0xDC */
     ret = i2c_raw_read(i2c, data, len);
 
     LOG_DBG("I2C read: bank=0x%02x reg=0x%02x len=%d data=%02x %02x -> %s",
@@ -116,8 +140,13 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
 }
 
 /*
- * Write registers to CXD6801
- * ALL operations via 0xDC (confirmed working)
+ * Write registers to CXD6801 demodulator or tuner.
+ *
+ * For demod (i2c_addr=0xC8): uses 0xDC for all operations (confirmed working)
+ * For tuner (i2c_addr=0xC2): uses 0xC2 directly (via I2C repeater, no bank select)
+ *
+ * The ASCOT3 tuner has a flat register space (no bank concept),
+ * so we skip bank select when accessing the tuner.
  */
 hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
                                     uint8_t reg, const uint8_t *data, uint8_t len)
@@ -129,11 +158,26 @@ hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
         return HDTVMATE_ERR_INVALID_PARAM;
     }
 
-    /* Step 1: Select bank via 0xDC */
+    /* Tuner access: direct I2C write using tuner address, no bank select */
+    if (i2c->i2c_addr != CXD6801_I2C_ADDR_DEMOD &&
+        i2c->i2c_addr != CXD6801_I2C_ADDR_WRITE) {
+        /* Tuner: write [reg, data...] directly to tuner I2C address */
+        tx[0] = len + 1;
+        tx[1] = i2c->i2c_bus;
+        tx[2] = i2c->i2c_addr;  /* e.g. 0xC2 for ASCOT3 tuner */
+        tx[3] = reg;
+        memcpy(&tx[4], data, len);
+        ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);
+
+        LOG_TRC("I2C tuner write: addr=0x%02x reg=0x%02x len=%d -> %s",
+                i2c->i2c_addr, reg, len, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
+        return ret;
+    }
+
+    /* Demod: bank select + register write via 0xDC */
     ret = cxd6801_i2c_select_bank(i2c, bank);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Step 2: Write [reg, data...] via 0xDC */
     tx[0] = len + 1;
     tx[1] = i2c->i2c_bus;
     tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */

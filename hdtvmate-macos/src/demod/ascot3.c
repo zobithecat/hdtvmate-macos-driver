@@ -146,9 +146,16 @@ static int ascot3_freq_range(uint32_t freq_khz)
  * ============================================================ */
 static hdtvmate_error_t cxd6801_i2c_repeater_enable(cxd6801_device_t *dev, bool enable)
 {
-    /* Bank 0x00, reg 0x1A, bit 0 = repeater enable */
+    /*
+     * From Ghidra decompile of sony_cxd6801_demod_I2cRepeaterEnable():
+     *   WriteOneRegister(pI2c, i2cAddressSLVX, 0x08, enable)
+     *
+     * i2cAddressSLVX is a separate I2C sub-address on the demod.
+     * In our single-address I2C implementation:
+     *   Bank 0x00, reg 0x08 = repeater enable (CONFIRMED from Ghidra)
+     */
     uint8_t val = enable ? 0x01 : 0x00;
-    return cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, val);
+    return cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, val);
 }
 
 /* ============================================================

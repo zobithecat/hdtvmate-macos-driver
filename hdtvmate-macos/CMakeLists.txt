@@ -54,6 +54,10 @@ target_link_libraries(hdtvmate_scan hdtvmate_core)
 add_executable(hdtvmate_tune src/tools/tune.c)
 target_link_libraries(hdtvmate_tune hdtvmate_core)
 
+# --- CLI tool: tune test (no capture, just lock check) ---
+add_executable(hdtvmate_tune_test src/tools/tune_test.c)
+target_link_libraries(hdtvmate_tune_test hdtvmate_core)
+
 # --- CLI tool: full reset scan ---
 add_executable(hdtvmate_resetscan src/tools/full_reset_scan.c)
 target_link_libraries(hdtvmate_resetscan hdtvmate_core)
