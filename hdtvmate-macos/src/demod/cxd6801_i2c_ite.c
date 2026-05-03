@@ -73,13 +73,14 @@ static hdtvmate_error_t i2c_raw_read(cxd6801_i2c_t *i2c, uint8_t *data, uint8_t 
  */
 static hdtvmate_error_t cxd6801_i2c_select_bank(cxd6801_i2c_t *i2c, uint8_t bank)
 {
-    /* Bank select: write reg 0x00 = bank value
-     * Use WRITE address (0xC8) for register writes! */
+    /* Bank select: write reg 0x00 = bank value via 0xDC.
+     * Testing confirmed: 0xC8 bank select only affects 0xC8 writes.
+     * 0xDC has independent bank state. All ops must use 0xDC. */
     uint8_t tx[64];
     uint8_t data[2] = {0x00, bank};
     tx[0] = 2;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_WRITE;  /* 0xC8 for writes */
+    tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC — unified bank select */
     memcpy(&tx[3], data, 2);
     return br_cmd_send(i2c->bridge, 0x002B, tx, 5, NULL, 0);
 }
@@ -120,18 +121,23 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
         return ret;
     }
 
-    /* CXD6801 I2C Protocol (confirmed by testing):
-     * - Bank select: 0xC8 write [0x00, bank] — sets bank for BOTH read and write
-     * - Register write: 0xC8 write [reg, data...] — writes to selected bank
-     * - Register read: 0xDC write [reg] then 0xDC read [data]
+    /*
+     * CXD6801 I2C Read:
+     * Bank select via 0xC8 (SLV-T write addr), then reg ptr + read via 0xDC.
      *
-     * Bank state is shared between 0xC8 and 0xDC (one device, two I2C addrs).
-     * Write to 0xDC sets the register pointer for subsequent reads.
-     * syncStat=0x01 confirmed at 701MHz with this approach! */
-    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xC8: [0x00, bank] */
+     * NOTE on addresses:
+     *   0xC8 = SLV-T write address (bank select + register write)
+     *   0xDC = SLV-T read address (register pointer + data read)
+     *   Both are the SAME physical chip, bank state IS shared.
+     *
+     * CMD 0x2A combined (4-byte) format was tested but returned 0xFF/0x00
+     * on this firmware version. Using split: write reg ptr + read.
+     */
+    /* Bank select + read all via 0xDC */
+    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xDC: [0x00, bank] */
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Set register pointer via 0xDC (does NOT corrupt bank state) */
+    /* Set register pointer via 0xDC */
     tx_reg[0] = 1;
     tx_reg[1] = i2c->i2c_bus;
     tx_reg[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
@@ -184,15 +190,15 @@ hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
         return ret;
     }
 
-    /* Demod: bank select then register write, both via WRITE addr (0xC8).
-     * Bank select and data write are separate I2C transactions but
-     * the device maintains bank state between them. */
-    ret = cxd6801_i2c_select_bank(i2c, bank);
+    /* Demod: all ops via 0xDC (bank select + write + read all unified).
+     * Testing showed 0xC8 and 0xDC have independent bank state.
+     * Using 0xDC for everything ensures consistent bank handling. */
+    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xDC: [0x00, bank] */
     if (ret != HDTVMATE_OK) return ret;
 
     tx[0] = len + 1;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_WRITE;  /* 0xC8 for writes */
+    tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC for all operations */
     tx[3] = reg;
     memcpy(&tx[4], data, len);
     ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);
