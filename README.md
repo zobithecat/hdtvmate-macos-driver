@@ -27,9 +27,21 @@ GTMedia HDTV Mate USB 튜너 스틱을 macOS에서 사용하기 위한 오픈소
 
 | 구성요소 | 칩셋 | 역할 |
 |---------|------|------|
-| USB 브리지 | ITE IT9300 | USB ↔ I2C 변환, 펌웨어 실행, TS 멀티플렉싱, PID 필터링 |
-| 디모듈레이터 | Sony CXD6801 | ATSC 3.0/1.0/J.83B 복조, ALP/TS 출력 |
-| RF 튜너 | Sony ASCOT3 (내장) | RF 주파수 선택, PLL 합성, LNA |
+| USB 브리지 | ITE IT9300 (FW v2.65.131.0) | USB ↔ I2C 변환, TS 멀티플렉싱, PID 필터링 |
+| 디모듈레이터 | Sony CXD6801 (Chip ID: 0x0396) | ATSC 3.0/1.0/J.83B 복조, ALP/TS 출력 |
+| RF 튜너 | Sony ASCOT3 (CXD6801 내장) | RF 주파수 선택, PLL 합성, LNA |
+
+### 확인된 USB/I2C 파라미터
+
+| 파라미터 | 값 | 비고 |
+|---------|-----|------|
+| USB VID:PID | `23E2:2B02` | Zenview (제조사) |
+| USB Endpoints | TX=0x02, RX=0x81, RX_TS=0x84 | Bulk transfer |
+| I2C Bus | 3 | IT9300 I2C bus index |
+| CXD6801 Write Addr | 0xC8 | Bank select + register write |
+| CXD6801 Read Addr | 0xDC | Register pointer + data read |
+| I2C CMD Write | 0x002B | Endeavour protocol |
+| I2C CMD Read | 0x002A | Endeavour protocol |
 
 ## 리버스 엔지니어링
 
@@ -48,103 +60,39 @@ libatsc3 오픈소스 라이브러리 기반이나, **Sony CXD6801 PHY 드라이
 | `liba3_phy_sony.so` | 5.5 MB | **not stripped** | PHY 드라이버 (IT9300 + CXD6801) |
 | `liba3_core.so` | 11 MB | not stripped | ATSC 3.0 프로토콜 스택 |
 | `liba3_bridge.so` | 778 KB | not stripped | 서비스 관리 브리지 |
-| `liba3_bridge_media_mmt.so` | 1.8 MB | not stripped | MMT 미디어 핸들링 |
-| `liba3_bridge_media_a1ts.so` | 315 KB | not stripped | ATSC 1.0 TS 핸들링 |
 | `libusb_android_sony.so` | 270 KB | not stripped | Android libusb 래퍼 |
-| `libavcodec/util/swresample/swscale.so` | 각종 | stripped | FFmpeg A/V 코덱 |
 
-### 심볼 분석 요약
+### Ghidra 디컴파일 완료 함수
 
-`liba3_phy_sony.so`에서 추출한 **2,183개 exported 함수**:
+| 함수 | 주소 | 크기 | 상태 |
+|------|------|------|------|
+| `X_tune` (ASCOT3 core tune) | 0xdf520 | 4068B | ✅ 완료 → C 구현됨 |
+| `X_oscen` (VCO enable) | 0xdf344 | 476B | ✅ 완료 → C 구현됨 |
+| `sony_cxd6801_ascot3_Tune` | 0xdf178 | 3500B | ✅ 완료 |
+| `sony_cxd6801_ascot3_Create` | 0xde304 | 292B | ✅ 완료 |
+| `sony_cxd6801_demod_atsc3_Tune` | 0xea914 | 488B | ✅ 완료 |
+| `SLtoAA3` (Sleep→Active ATSC3) | 0xeaafc | 2316B | ✅ 완료 → C 구현됨 |
+| `SLtoAA3_BandSetting` | 0xed7f0 | 2336B | ✅ 완료 → C 구현됨 |
+| `sony_cxd6801_demod_atsc3_CheckDemodLock` | 0xebd38 | 320B | ✅ 완료 |
+| `sony_cxd6801_demod_atsc3_monitor_SyncStat` | 0xef3cc | 588B | ✅ 완료 |
+| `sony_cxd6801_demod_TuneEnd` | 0xe3924 | 224B | ✅ 완료 |
+| `sony_cxd6801_demod_SoftReset` | 0xe3a04 | 288B | ✅ 완료 |
+| `sony_cxd6801_demod_SetStreamOutput` | 0xe3b24 | 596B | ✅ 완료 |
+| `sony_cxd6801_demod_I2cRepeaterEnable` | 0xe6e6c | 164B | ✅ 완료 |
+| `sony_cxd6801_demod_SetALPClockModeAndFreq` | 0xe8820 | 956B | ✅ 완료 |
+| `sony_cxd6801_integ_atsc3_Tune` | 0x105d90 | 760B | ✅ 완료 |
 
-```
-469개 핵심 함수 분류:
-  - Sony CXD6801 디모듈레이터:  185개 (sony_cxd6801_*)
-  - CXD6801 ATSC 3.0 모니터:    22개
-  - CXD6801 통합 레이어:        21개
-  - ASCOT3 튜너:                12개
-  - IT9300 브리지 API:          30개+
-  - 브리지 커맨드 (BrCmd/Cmd):  20개
-  - 드라이버 레이어 (DL_):      40개+
-  - JNI 인터페이스:             8개
-  - SonyPHYAndroid 클래스:      20개+
-```
+### g_param_table (TV System 파라미터)
 
-### 추출된 데이터
-
-| 항목 | 크기 | 설명 |
-|-----|------|------|
-| IT9300 펌웨어 | 9,385 bytes | `brFirmware_codes/segments/partitions/scripts` |
-| 소스 경로 | 206개 파일 | debug_info에서 원본 소스 트리 구조 확인 |
-
-### 디바이스 초기화 흐름 (바이너리 분석)
-
-```
-SonyPHYAndroid::open(vid, pid, path)
-  ├── libusb_init() → libusb_open()
-  ├── USB 엔드포인트 탐색 (TX, RX, RX_TS)
-  ├── libusb_claim_interface()
-  │
-  ├── download_bootloader_firmware()
-  │   ├── BrCmd_loadFirmware()  ← brFirmware_codes[] 업로드
-  │   └── IT9300_reboot()
-  │
-  ├── internal_it930x_initialize()
-  │   ├── IT9300_initialize()
-  │   ├── internal_getEEPROMConfig()  ← 디바이스 설정 읽기
-  │   └── internal_get_rx_id()        ← 디모듈레이터 종류 판별
-  │
-  ├── DRV_CXD6801_initialize()
-  │   ├── drvi2c_cxd6801_ite_Initialize()  ← I2C 브리지 설정
-  │   ├── sony_cxd6801_demod_Create()
-  │   ├── sony_cxd6801_demod_Initialize()  ← 레지스터 초기화 시퀀스
-  │   ├── sony_cxd6801_ascot3_Create()
-  │   └── sony_cxd6801_ascot3_Initialize() ← 튜너 초기화
-  │
-  └── 4개 스레드 시작:
-      ├── captureThread  ← USB bulk read (ENDPOINT_RX_TS)
-      ├── processThread  ← TLV/ALP 파싱
-      ├── statusThread   ← 신호 품질 모니터링
-      └── consumerThread ← 데이터 소비
-```
-
-### 튜닝 흐름
-
-```
-nativeTune(frequency_khz, bandwidth, plp_id)
-  ├── sony_cxd6801_ascot3_Tune()        ← RF PLL 주파수 설정
-  ├── sony_cxd6801_demod_atsc3_Tune()   ← 디모듈레이터 ATSC3 모드
-  ├── sony_cxd6801_demod_TuneEnd()      ← 수신 시작
-  └── DRV_CXD6801_acquireChannelPlp()   ← PLP 선택 + 잠금 대기
-```
+바이너리 offset `0x3C4CC`에서 추출. 32 entries × 16 bytes.
+주파수 대역별 gain/filter/AGC 설정을 포함.
 
 ## macOS 드라이버 (`hdtvmate-macos/`)
-
-### 아키텍처
-
-```
-┌─────────────────────────────────────────────────┐
-│              macOS CLI / SwiftUI App             │
-├─────────────────────────────────────────────────┤
-│         libhdtvmate_core.a (C 라이브러리)         │
-│  ┌──────────┐  ┌────────────┐  ┌─────────────┐ │
-│  │ USB 레이어│  │ IT9300     │  │ CXD6801     │ │
-│  │ (libusb) │  │ 브리지     │  │ 디모듈레이터│ │
-│  └──────────┘  └────────────┘  └─────────────┘ │
-│  ┌──────────┐  ┌────────────┐  ┌─────────────┐ │
-│  │ 채널 스캔│  │ TS 캡처    │  │ UDP/파일    │ │
-│  │          │  │ (3 threads)│  │ 출력        │ │
-│  └──────────┘  └────────────┘  └─────────────┘ │
-└─────────────────────────────────────────────────┘
-```
 
 ### 빌드
 
 ```bash
-# 의존성
 brew install libusb cmake
-
-# 빌드
 cd hdtvmate-macos
 mkdir build && cd build
 cmake ..
@@ -154,29 +102,24 @@ make
 ### CLI 도구
 
 ```bash
-# 1. USB 디바이스 탐지
-./hdtvmate_detect              # ITE 디바이스 자동 탐지
-./hdtvmate_detect --list       # 전체 USB 디바이스 목록
-./hdtvmate_detect 048D 9306    # 특정 VID/PID로 연결
+# 디바이스 탐지
+./hdtvmate_detect
 
-# 2. 하드웨어 초기화 테스트
-./hdtvmate_init                # 전체 초기화 (USB → IT9300 → CXD6801)
-./hdtvmate_init <VID> <PID>    # 특정 디바이스
+# 하드웨어 초기화 테스트
+./hdtvmate_init
 
-# 3. 채널 스캔
-./hdtvmate_scan                # ATSC 3.0 + 1.0 전체 스캔
-./hdtvmate_scan --atsc3        # ATSC 3.0만
-./hdtvmate_scan --atsc1        # ATSC 1.0만
-./hdtvmate_scan --channel 14   # 단일 채널 (CH 14 = 473 MHz)
+# 튜닝 테스트 (lock 확인만, 캡처 없음)
+./hdtvmate_tune_test 701000          # 701 MHz (한국 UHF ch52)
+./hdtvmate_tune_test --channel 14    # 473 MHz (US ch14)
+./hdtvmate_tune_test 701000 --atsc1  # ATSC 1.0 모드
 
-# 4. 튜닝 + 캡처
-./hdtvmate_tune 473000                      # stdout 출력 (파이프 가능)
-./hdtvmate_tune --channel 14 -o output.ts   # 파일 저장
-./hdtvmate_tune --channel 14 --udp 127.0.0.1:1234  # UDP 스트리밍
+# 채널 스캔
+./hdtvmate_scan
 
-# VLC/mpv로 시청
+# 튜닝 + TS 캡처
+./hdtvmate_tune 701000 -o output.ts
+./hdtvmate_tune 701000 --udp 127.0.0.1:1234
 vlc udp://@:1234
-mpv udp://127.0.0.1:1234
 ```
 
 ### 프로젝트 구조
@@ -195,17 +138,18 @@ hdtvmate-macos/
 │   ├── usb/usb_device.c        # libusb 래퍼, 자동 탐지
 │   ├── bridge/
 │   │   ├── br_user.c           # 플랫폼 추상화 (libusb bulk transfer)
-│   │   ├── br_cmd.c            # IT9300 커맨드 프로토콜 (체크섬, 프레이밍)
-│   │   ├── it9300.c            # IT9300 초기화, EEPROM, PID 필터
+│   │   ├── br_cmd.c            # Endeavour 커맨드 프로토콜
+│   │   ├── it9300.c            # IT9300 초기화, GPIO reset, 전원 제어
 │   │   └── br_firmware.h       # 추출된 IT9300 펌웨어 (9,385 bytes)
 │   ├── demod/
-│   │   ├── cxd6801_i2c_ite.c   # I2C over IT9300 (뱅크 선택 + R/W)
+│   │   ├── cxd6801_i2c_ite.c   # I2C over IT9300 (bank select + R/W)
 │   │   ├── cxd6801.c           # 디모듈레이터 코어 (init, sleep, acquire)
-│   │   ├── cxd6801_atsc3.c     # ATSC 3.0 튜닝/잠금/PLP
+│   │   ├── cxd6801_atsc3.c     # ATSC 3.0 SLtoAA3 + BandSetting + 잠금
 │   │   ├── cxd6801_monitor.c   # SNR/BER/L1/Bootstrap 모니터링
-│   │   └── ascot3.c            # ASCOT3 RF 튜너 (PLL, BW 필터)
+│   │   ├── ascot3.c            # ASCOT3 RF 튜너 (X_oscen + X_tune)
+│   │   └── ascot3_tune.h       # X_tune 레지스터 시퀀스 문서
 │   ├── scan/
-│   │   ├── frequency_table.c   # US ATSC 주파수 테이블 (CH 2-51)
+│   │   ├── frequency_table.c   # ATSC 주파수 테이블
 │   │   └── channel_scan.c      # 전체/단일 채널 스캔
 │   ├── capture/
 │   │   ├── circular_buffer.c   # 링 버퍼 (8 MB, 쓰레드 세이프)
@@ -214,69 +158,70 @@ hdtvmate-macos/
 │   │   ├── udp_output.c        # UDP 멀티캐스트 출력
 │   │   └── file_output.c       # TS 파일 저장
 │   └── tools/
-│       ├── detect.c            # hdtvmate_detect CLI
-│       ├── init_test.c         # hdtvmate_init CLI
-│       ├── scan.c              # hdtvmate_scan CLI
-│       └── tune.c              # hdtvmate_tune CLI
+│       ├── detect.c            # hdtvmate_detect
+│       ├── init_test.c         # hdtvmate_init
+│       ├── scan.c              # hdtvmate_scan
+│       ├── tune.c              # hdtvmate_tune (full capture)
+│       ├── tune_test.c         # hdtvmate_tune_test (lock check only)
+│       └── diag_test.c         # hdtvmate_diag (register dump)
 └── tools/
     ├── extract_firmware.py     # 바이너리에서 IT9300 펌웨어 추출
-    └── analyze_symbols.py      # .so 심볼 분석/분류 리포트
+    └── analyze_symbols.py      # .so 심볼 분석/분류
 ```
 
 ## 현재 상태
 
-### 완료
+### 동작 확인됨 ✅
 
-- [x] APK 리버스 엔지니어링 (구조 분석, 네이티브 라이브러리 추출)
-- [x] 하드웨어 아키텍처 파악 (ITE IT9300 + Sony CXD6801)
-- [x] 2,183개 심볼 분석 및 469개 핵심 함수 분류
-- [x] IT9300 펌웨어 추출 (9,385 bytes)
-- [x] 소스 트리 구조 재구성 (debug_info에서 206개 파일 경로)
-- [x] macOS 드라이버 프레임워크 구현 (20개 C 소스 파일)
-- [x] USB 디바이스 탐지 (libusb)
-- [x] IT9300 USB 커맨드 프로토콜 (체크섬, 레지스터 R/W, 펌웨어 로드)
-- [x] CXD6801 I2C-over-IT9300 통신 레이어
-- [x] ATSC 3.0/1.0 채널 스캔 프레임워크
-- [x] 3-스레드 TS 캡처 (capture/process/status)
-- [x] UDP + 파일 출력 (VLC/mpv 연동)
-- [x] 4개 CLI 도구 빌드 (ARM64 macOS)
+- [x] USB 디바이스 탐지 및 열기 (VID=23E2, PID=2B02)
+- [x] IT9300 브리지 초기화 (GPIO reset, 전원 enable, FW 확인)
+- [x] CXD6801 Chip ID 읽기 (0x0396)
+- [x] I2C register WRITE (bank select via 0xC8 + data write via 0xC8)
+- [x] I2C register READ (bank 0 — reg pointer via 0xDC + read via 0xDC)
+- [x] ASCOT3 튜너 설정 (X_oscen + X_tune 전체 6단계 레지스터 시퀀스)
+- [x] SLtoAA3 모드 전환 (Sleep → Active ATSC 3.0, 15+ register writes)
+- [x] BandSetting 6MHz (nominalRate, ITB coefficients, filter)
+- [x] SoftReset (acquisition trigger)
+- [x] **syncStat=1 달성** (OFDM bootstrap 감지, 한국 UHF 698~767 MHz)
 
-### TODO: Ghidra 디컴파일 필요
+### 진행중 🔧
 
-CXD6801 PHY 드라이버 소스가 비공개이므로, 아래 함수들의 레지스터 시퀀스를 Ghidra로 추출해야 함:
+- [ ] **I2C read bank select** — 현재 bank 0만 읽힘. bank 0x90+ 레지스터 읽기 불가.
+  - Write bank select (0xC8)와 read (0xDC)가 별도 bank state를 유지하는 것으로 추정
+  - IT9300 combined I2C transaction (repeated start) 조사 필요
+- [ ] syncStat > 5 (full demod lock) 달성
+- [ ] ALP lock 확인
+- [ ] TS/ALP 데이터 수신 확인
 
-| 우선순위 | 함수 | 주소 | 설명 |
-|---------|------|------|------|
-| 1 | `sony_cxd6801_demod_Initialize` | `0x0e2698` | 디모듈레이터 초기화 레지스터 시퀀스 |
-| 2 | `sony_cxd6801_demod_atsc3_Tune` | `0x0ea914` | ATSC 3.0 튜닝 레지스터 설정 |
-| 3 | `sony_cxd6801_ascot3_Tune` | `0x0df178` | ASCOT3 PLL 주파수 계산 |
-| 4 | `sony_cxd6801_ascot3_Initialize` | `0x0de514` | 튜너 초기화 시퀀스 |
-| 5 | `DRV_CXD6801_initialize` | `0x1ae1b8` | 전체 초기화 통합 흐름 |
-| 6 | `BrUser_busTx` / `BrUser_busRx` | `0x188650` / `0x1889c8` | USB 프로토콜 상세 |
-| 7 | `sony_cxd6801_demod_atsc3_CheckDemodLock` | `0x0ebd38` | 잠금 상태 레지스터 |
-| 8 | `sony_cxd6801_demod_atsc3_CheckALPLock` | `0x0ebe78` | ALP 잠금 레지스터 |
+### TODO 📋
 
-### TODO: 실제 디바이스 테스트
+- [ ] I2C read bank select 해결 → 모든 bank의 register 읽기 가능하게
+- [ ] 전체 demod lock 확인 (syncStat=6)
+- [ ] TS 캡처 → 파일 저장 테스트
+- [ ] UDP 출력 → VLC 재생 확인
+- [ ] 한국 지상파 UHD 채널 스캔 (ch52~56, 698~725 MHz)
+- [ ] ATSC 1.0 (8VSB) 지원 확인
+- [ ] macOS SwiftUI 앱
 
-1. HDTV Mate 연결 → `./hdtvmate_detect`로 VID/PID 확인
-2. Ghidra에서 추출한 레지스터 값으로 코드 업데이트
-3. `./hdtvmate_init`로 하드웨어 초기화 테스트
-4. `./hdtvmate_scan`으로 채널 스캔
-5. `./hdtvmate_tune`으로 실시간 시청
+## 한국 지상파 UHD 방송 정보
 
-### TODO: 향후 계획
+대한민국은 **세계 최초** ATSC 3.0 지상파 UHD 방송을 2017년부터 시행.
 
-- [ ] Ghidra 디컴파일 → CXD6801 레지스터 시퀀스 채우기
-- [ ] 실제 디바이스 VID/PID 확인 및 반영
-- [ ] USB 프로토콜 실제 디바이스 응답에 맞춰 조정
-- [ ] libatsc3 core 빌드 (ROUTE/DASH, MMT 프로토콜 스택)
-- [ ] macOS SwiftUI 앱 (Phase 6)
+| 항목 | 스펙 |
+|------|------|
+| 전송 방식 | ATSC 3.0 (IP 기반) |
+| 주파수 대역 | UHF 470~806 MHz |
+| 채널 대역폭 | **6 MHz** |
+| 변조 방식 | OFDM |
+| 영상 코덱 | HEVC (H.265) |
+| 해상도 | 3840×2160 (4K UHD) |
+| 수도권 주파수 | 698~710 MHz, 753~771 MHz |
 
 ## 참조
 
 ### 오픈소스
 
-- [libatsc3](https://github.com/kansonkong/libatsc3) — ATSC 3.0 프로토콜 스택 (코어는 공개, PHY는 비공개)
+- [libatsc3](https://github.com/kansonkong/libatsc3) — ATSC 3.0 프로토콜 스택
 - [Linux kernel af9035.c](https://github.com/torvalds/linux/blob/master/drivers/media/usb/dvb-usb-v2/af9035.c) — IT930x USB 프로토콜 참조
 - [Linux kernel cxd2880](https://github.com/torvalds/linux/tree/master/drivers/media/dvb-frontends/cxd2880) — Sony CXD2880 드라이버 (레지스터 패턴 참조)
 - [libusb](https://libusb.info/) — 크로스 플랫폼 USB 라이브러리
@@ -285,7 +230,6 @@ CXD6801 PHY 드라이버 소스가 비공개이므로, 아래 함수들의 레�
 
 - [HDTV Mate Review (Lon Seidman)](https://blog.lon.tv/2024/01/17/gt-media-hdtv-mate-the-most-affordable-atsc-3-tuner-so-far/)
 - [Sony ATSC 3.0 Receiver LSI Paper](https://www.atsc.org/wp-content/uploads/2021/01/f-36-26-13345252_W2dnWCqD_sony_ATSC3.0_receiverLSI_rev1.0.pdf)
-- [NGBP.org — ATSC 3.0 Open Source Tools](https://www.ngbp.org/p/atsc-30-ngbp-open-source-tools.html)
 
 ## 라이선스
 
