@@ -174,34 +174,48 @@ hdtvmate-macos/
 ### 동작 확인됨 ✅
 
 - [x] USB 디바이스 탐지 및 열기 (VID=23E2, PID=2B02)
-- [x] IT9300 브리지 초기화 (GPIO reset, 전원 enable, FW 확인)
+- [x] IT9300 브리지 초기화 (GPIO reset, 전원 enable, FW v2.65.131.0)
 - [x] CXD6801 Chip ID 읽기 (0x0396)
-- [x] I2C register WRITE (bank select via 0xC8 + data write via 0xC8)
-- [x] I2C register READ (bank 0 — reg pointer via 0xDC + read via 0xDC)
+- [x] I2C 프로토콜 확정 (UTM VM 테스트로 검증)
+  - Bank select: CMD 0x2B `[2, bus=3, 0xC8, 0x00, bank]`
+  - Data write: CMD 0x2B `[len+1, bus=3, 0xDC, reg, data...]`
+  - Reg pointer: CMD 0x2B `[1, bus=3, 0xDC, reg]`
+  - Data read: CMD 0x2A `[len, bus=3, 0xDC]`
 - [x] ASCOT3 튜너 설정 (X_oscen + X_tune 전체 6단계 레지스터 시퀀스)
 - [x] SLtoAA3 모드 전환 (Sleep → Active ATSC 3.0, 15+ register writes)
 - [x] BandSetting 6MHz (nominalRate, ITB coefficients, filter)
 - [x] SoftReset (acquisition trigger)
 - [x] **syncStat=1 달성** (OFDM bootstrap 감지, 한국 UHF 698~767 MHz)
+- [x] **안테나 문제 확정** — LineageOS VM에서 Android 앱도 동일하게 lock 실패
+- [x] LineageOS UTM VM 셋업 + HDTV Player 앱 동작 확인
+
+### I2C 주소 맵 (확정)
+
+| 주소 | 역할 | 비고 |
+|------|------|------|
+| 0xC8 | CXD6801 SLV-T write | Bank select + register write (write-only) |
+| 0xDC | CXD6801 SLV-T/X read | Reg pointer + data read + data write |
+| 0xC0 | ASCOT3 tuner | Android 앱 로그에서 확인 (`I2C Write error addr c0`) |
 
 ### 진행중 🔧
 
-- [ ] **I2C read bank select** — 현재 bank 0만 읽힘. bank 0x90+ 레지스터 읽기 불가.
-  - Write bank select (0xC8)와 read (0xDC)가 별도 bank state를 유지하는 것으로 추정
-  - IT9300 combined I2C transaction (repeated start) 조사 필요
+- [ ] **I2C write bank select** — bank 0 이외에 write 시 bank 적용 안 됨
+  - Bank select(0xC8) 후 write(0xDC)하면 bank 0에만 써짐
+  - Sony 드라이버는 `IT9300_writeGenericRegisters`로 0xC8에 직접 write
+  - 0xF424 (IT9300 no-stop mode)는 이 FW에서 bus stuck 유발
+  - 해결 방안: bank+reg+data를 하나의 I2C 메시지로 합치기
 - [ ] syncStat > 5 (full demod lock) 달성
-- [ ] ALP lock 확인
-- [ ] TS/ALP 데이터 수신 확인
+- [ ] 안테나 업그레이드 필요 (실외/증폭기)
 
 ### TODO 📋
 
-- [ ] I2C read bank select 해결 → 모든 bank의 register 읽기 가능하게
-- [ ] 전체 demod lock 확인 (syncStat=6)
+- [ ] Write bank select 해결 → bank 0x90+ register write 가능하게
+- [ ] 제대로 된 UHF 안테나로 demod lock 테스트
 - [ ] TS 캡처 → 파일 저장 테스트
 - [ ] UDP 출력 → VLC 재생 확인
-- [ ] 한국 지상파 UHD 채널 스캔 (ch52~56, 698~725 MHz)
-- [ ] ATSC 1.0 (8VSB) 지원 확인
+- [ ] 한국 지상파 채널 스캔 (473~605 MHz, ATSC 3.0 + 1.0)
 - [ ] macOS SwiftUI 앱
+- [ ] LineageOS VM에서 lock 성공 시 full logcat 분석
 
 ## 한국 지상파 UHD 방송 정보
 
