@@ -1,0 +1,70 @@
+cmake_minimum_required(VERSION 3.20)
+project(hdtvmate VERSION 0.1.0 LANGUAGES C)
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_C_STANDARD_REQUIRED ON)
+
+# Find libusb
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBUSB REQUIRED libusb-1.0)
+
+# Common include directories
+include_directories(
+    ${CMAKE_SOURCE_DIR}/include
+    ${CMAKE_SOURCE_DIR}/src
+    ${LIBUSB_INCLUDE_DIRS}
+)
+
+link_directories(${LIBUSB_LIBRARY_DIRS})
+
+# --- Core driver library ---
+add_library(hdtvmate_core STATIC
+    src/usb/usb_device.c
+    src/bridge/br_user.c
+    src/bridge/br_cmd.c
+    src/bridge/it9300.c
+    src/demod/cxd6801_i2c_ite.c
+    src/demod/cxd6801.c
+    src/demod/cxd6801_atsc3.c
+    src/demod/cxd6801_monitor.c
+    src/demod/ascot3.c
+    src/scan/frequency_table.c
+    src/scan/channel_scan.c
+    src/capture/circular_buffer.c
+    src/capture/capture_thread.c
+    src/output/udp_output.c
+    src/output/file_output.c
+)
+
+target_link_libraries(hdtvmate_core ${LIBUSB_LIBRARIES} pthread)
+
+# --- CLI tool: device detection ---
+add_executable(hdtvmate_detect src/tools/detect.c)
+target_link_libraries(hdtvmate_detect hdtvmate_core)
+
+# --- CLI tool: full initialization ---
+add_executable(hdtvmate_init src/tools/init_test.c)
+target_link_libraries(hdtvmate_init hdtvmate_core)
+
+# --- CLI tool: channel scan ---
+add_executable(hdtvmate_scan src/tools/scan.c)
+target_link_libraries(hdtvmate_scan hdtvmate_core)
+
+# --- CLI tool: tune and capture ---
+add_executable(hdtvmate_tune src/tools/tune.c)
+target_link_libraries(hdtvmate_tune hdtvmate_core)
+
+# --- CLI tool: full reset scan ---
+add_executable(hdtvmate_resetscan src/tools/full_reset_scan.c)
+target_link_libraries(hdtvmate_resetscan hdtvmate_core)
+
+# --- CLI tool: GPIO reset search ---
+add_executable(hdtvmate_gpio src/tools/gpio_reset.c)
+target_link_libraries(hdtvmate_gpio hdtvmate_core)
+
+# --- CLI tool: EEPROM dump ---
+add_executable(hdtvmate_eeprom src/tools/eeprom_dump.c)
+target_link_libraries(hdtvmate_eeprom hdtvmate_core)
+
+# Compiler flags
+target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)

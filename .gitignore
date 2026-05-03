@@ -1,0 +1,6 @@
+hdtvmate-macos/build/
+xapk_extracted/
+*.xapk
+*.iso
+.DS_Store
+/tmp/
