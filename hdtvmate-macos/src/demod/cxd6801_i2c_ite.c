@@ -73,15 +73,17 @@ static hdtvmate_error_t i2c_raw_read(cxd6801_i2c_t *i2c, uint8_t *data, uint8_t 
  */
 static hdtvmate_error_t cxd6801_i2c_select_bank(cxd6801_i2c_t *i2c, uint8_t bank)
 {
-    /* Bank select: write reg 0x00 = bank value via 0xDC.
-     * Testing confirmed: 0xC8 bank select only affects 0xC8 writes.
-     * 0xDC has independent bank state. All ops must use 0xDC. */
-    uint8_t tx[64];
-    uint8_t data[2] = {0x00, bank};
+    /*
+     * Bank select via 0xC8 (SLV-T write address).
+     * Confirmed working in UTM Linux VM test:
+     *   CMD 0x2B [2, bus=3, addr=0xC8, 0x00, bank] → bank applied to both 0xC8 and 0xDC
+     */
+    uint8_t tx[8];
     tx[0] = 2;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC — unified bank select */
-    memcpy(&tx[3], data, 2);
+    tx[2] = CXD6801_I2C_ADDR_WRITE;  /* 0xC8 */
+    tx[3] = 0x00;
+    tx[4] = bank;
     return br_cmd_send(i2c->bridge, 0x002B, tx, 5, NULL, 0);
 }
 
@@ -190,15 +192,20 @@ hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
         return ret;
     }
 
-    /* Demod: all ops via 0xDC (bank select + write + read all unified).
-     * Testing showed 0xC8 and 0xDC have independent bank state.
-     * Using 0xDC for everything ensures consistent bank handling. */
-    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xDC: [0x00, bank] */
+    /*
+     * Demod write (confirmed from UTM VM test):
+     *   Bank select: CMD 0x2B [2, bus, 0xC8, 0x00, bank]
+     *   Reg write:   CMD 0x2B [len+1, bus, 0xC8, reg, data...]
+     * Both use 0xC8 (write address). Bank state shared with read (0xDC).
+     */
+    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xC8: [0x00, bank] */
     if (ret != HDTVMATE_OK) return ret;
 
+    /* Data write via 0xDC — works for both SLV-T and SLV-X registers.
+     * Bank select (0xC8) sets the bank, then 0xDC write goes to that bank. */
     tx[0] = len + 1;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC for all operations */
+    tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
     tx[3] = reg;
     memcpy(&tx[4], data, len);
     ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);
