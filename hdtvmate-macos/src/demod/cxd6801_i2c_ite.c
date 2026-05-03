@@ -135,11 +135,22 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
      * CMD 0x2A combined (4-byte) format was tested but returned 0xFF/0x00
      * on this firmware version. Using split: write reg ptr + read.
      */
-    /* Bank select + read all via 0xDC */
-    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xDC: [0x00, bank] */
+    /*
+     * Read sequence — bank select via 0xC8, reg ptr via 0xC8, read via 0xC8.
+     * Sony uses same deviceAddress for all three operations.
+     * Read uses CMD 0x2A with just [len, bus, addr] (no reg in payload).
+     * The device remembers the reg pointer from the previous write.
+     */
+
+    /* Bank select via 0xC8, reg pointer + read via 0xDC.
+     * This is the only combination that works on this device:
+     * - 0xC8: write-only (bank select + data write)
+     * - 0xDC: read-capable (reg pointer + data read)
+     * Bank state from 0xC8 IS shared with 0xDC (confirmed in VM). */
+    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xC8: [0x00, bank] */
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Set register pointer via 0xDC */
+    /* Reg pointer via 0xDC */
     tx_reg[0] = 1;
     tx_reg[1] = i2c->i2c_bus;
     tx_reg[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
@@ -147,8 +158,11 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
     ret = br_cmd_send(i2c->bridge, 0x002B, tx_reg, 4, NULL, 0);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Read data via 0xDC */
-    ret = i2c_raw_read(i2c, data, len);
+    /* Read via 0xDC */
+    tx_reg[0] = len;
+    tx_reg[1] = i2c->i2c_bus;
+    tx_reg[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
+    ret = br_cmd_send(i2c->bridge, 0x002A, tx_reg, 3, data, len);
 
     LOG_DBG("I2C read: bank=0x%02x reg=0x%02x len=%d data=%02x %02x -> %s",
             bank, reg, len,
