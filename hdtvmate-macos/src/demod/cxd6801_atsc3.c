@@ -396,29 +396,18 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return ret;
     }
 
-    /* Step 3: Tune the ASCOT3 tuner. Then if it didn't fully lock,
-     * Sony retries the whole atsc3_Tune again after 10ms — first
-     * attempt primes acquisition, second often locks.
-     * Implemented here as: tune → wait → retry-tune.  */
+    /* Step 3: Tune the ASCOT3 tuner */
     ret = cxd6801_tuner_tune(dev, frequency_khz, bw);
     if (ret != HDTVMATE_OK) {
         LOG_ERR("Tuner tune failed");
         return ret;
     }
 
-    /* 10ms gap (matches Sony's `usleep(10000)` between attempts) */
     br_user_delay(10);
 
-    /* Sony's 2nd integ_atsc3_Tune attempt — retry SLtoAA3 + tuner_tune
-     * to drive any leftover state into lock. */
-    ret = cxd6801_sltoaa3(dev);
-    if (ret == HDTVMATE_OK) {
-        ret = cxd6801_tuner_tune(dev, frequency_khz, bw);
-    }
-    if (ret != HDTVMATE_OK) {
-        LOG_WARN("2nd tune attempt failed (continuing)");
-        ret = HDTVMATE_OK;
-    }
+    /* Sony's 2nd integ_atsc3_Tune attempt */
+    cxd6801_sltoaa3(dev);
+    cxd6801_tuner_tune(dev, frequency_khz, bw);
 
     /* Step 4: TuneEnd - SoftReset to trigger acquisition sequence */
     ret = cxd6801_atsc3_tune_end(dev);
@@ -644,26 +633,99 @@ hdtvmate_error_t cxd6801_atsc3_sleep(cxd6801_device_t *dev)
 
 /* --- ATSC 1.0 operations --- */
 
+/* SLtoAA1 - Sleep to Active ATSC 1.0 mode transition.
+ *
+ * Decompiled from sony_cxd6801_demod_atsc_Tune → SLtoAA @ 0xe93b4.
+ * Key differences from SLtoAA3 (ATSC 3.0):
+ *   - SetTSClockModeAndFreq(5)   instead of SetALPClockModeAndFreq(6)
+ *   - SLVX reg 0x17 = 0x0F        (vs 0x0E for ATSC3)
+ *   - SLVT reg 0xA9 = 0x00 (TS)   (vs 0x02 ALP for ATSC3)
+ *   - SLVT reg 0x4B = 0x74        (same)
+ *   - SLVT reg 0x49 = 0x00        (same)
+ *   - SLVT reg 0x18 — not in ATSC1, but SLVX reg 0x18 = 0
+ *   - Additional bank 0xA3 reg 0xA1 (4-byte chip-config write)
+ *   - Slave-R (atsc1 sub-block) reg 0x13 = 3 — special SlaveRWriteRegister
+ *
+ * This is a minimal port — complete fidelity needs SlaveRWrite ports too.
+ */
+static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
+{
+    hdtvmate_error_t ret;
+
+    LOG_DBG("SLtoAA1: applying ATSC 1.0 mode transition...");
+
+    /* SetTSClockModeAndFreq(5) — ATSC1 uses TS output mode 5
+     * Bank 0x00 reg 0x32=0, reg 0x33=clock_div, reg 0x32=1 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x33, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVX reg 0x17 = 0x0F (enable ATSC1 clock) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0F);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0: output mode = TS (0x00), system = ATSC (0x01) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x74);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVX reg 0x18 = 0x00 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x18, 0x00);
+
+    LOG_DBG("SLtoAA1: minimal mode transition done");
+    return ret;
+}
+
 hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_khz)
 {
     hdtvmate_error_t ret;
 
     LOG_INFO("ATSC 1.0 tune: %u kHz", frequency_khz);
 
-    if (dev->state != CXD6801_STATE_SLEEP) {
-        ret = cxd6801_sleep(dev);
-        if (ret != HDTVMATE_OK) return ret;
+    /* Power-cycle + re-init like ATSC 3.0 path */
+    cxd6801_chip_power_cycle(dev->bridge);
+    {
+        extern hdtvmate_error_t cxd6801_read_chip_id(cxd6801_device_t *dev);
+        cxd6801_read_chip_id(dev);
+        dev->initialized = false;
+        dev->tuner_initialized = false;
+        ret = cxd6801_initialize(dev);
+        if (ret != HDTVMATE_OK) {
+            LOG_ERR("Re-init after power cycle failed");
+            return ret;
+        }
     }
 
-    /* TODO: ATSC 1.0 tune register sequence from Ghidra
-     * sony_cxd6801_demod_atsc_Tune()
-     * sony_cxd6801_integ_atsc_Tune()
-     */
+    /* SoftReset before mode transition */
+    cxd6801_soft_reset(dev);
 
+    /* SLtoAA1 - sleep to active ATSC 1.0 */
+    ret = cxd6801_sltoaa1(dev);
+    if (ret != HDTVMATE_OK) {
+        LOG_ERR("SLtoAA1 mode transition failed");
+        return ret;
+    }
+
+    /* Set state so tuner_tune picks ATSC1 g_param_table entry [9] */
+    dev->state = CXD6801_STATE_ACTIVE_ATSC1;
+
+    /* ASCOT3 tune with ATSC 1.0 front-end (gain=0x0C, RF filter=0x03) */
     ret = cxd6801_tuner_tune(dev, frequency_khz, CXD6801_BW_6MHZ);
-    if (ret != HDTVMATE_OK) return ret;
+    if (ret != HDTVMATE_OK) {
+        LOG_ERR("Tuner tune failed");
+        return ret;
+    }
 
-    ret = cxd6801_atsc3_tune_end(dev);  /* Similar tune-end sequence */
+    /* TuneEnd - SoftReset to trigger acquisition */
+    ret = cxd6801_atsc3_tune_end(dev);
     if (ret != HDTVMATE_OK) return ret;
 
     dev->state = CXD6801_STATE_ACTIVE_ATSC1;

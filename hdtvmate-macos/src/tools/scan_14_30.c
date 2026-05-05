@@ -36,16 +36,18 @@ int main(void)
     cxd6801_create(&demod, &bridge, 0);
     cxd6801_initialize(&demod);
 
-    printf("=== Channel sweep 14-30 (ATSC 3.0 mode + current g_param_table) ===\n\n");
-    printf("ch | freq(kHz) | Lock reg | sync | unlock | ALP\n");
-    printf("---+-----------+----------+------+--------+----\n");
+    int use_atsc1 = 1;  /* default to ATSC 1.0 sweep */
+    printf("=== Channel sweep 14-30 (ATSC %s mode) ===\n\n",
+           use_atsc1 ? "1.0" : "3.0");
 
     for (int ch = 14; ch <= 30; ch++) {
         uint32_t freq = frequency_for_channel((uint8_t)ch);
         if (freq == 0) continue;
 
         /* Tune */
-        hdtvmate_error_t ret = cxd6801_atsc3_tune(&demod, freq, CXD6801_BW_6MHZ);
+        hdtvmate_error_t ret = use_atsc1
+            ? cxd6801_atsc1_tune(&demod, freq)
+            : cxd6801_atsc3_tune(&demod, freq, CXD6801_BW_6MHZ);
         if (ret != HDTVMATE_OK) {
             printf("%2d | %7d   | TUNE FAIL\n", ch, freq);
             continue;
@@ -54,23 +56,22 @@ int main(void)
         /* Give chip 1s to attempt acquisition */
         usleep(1000000);
 
-        /* Read status registers */
-        uint8_t lock90 = 0, lock91 = 0, alp = 0;
-        cxd6801_i2c_read(&demod.i2c_demod, 0x90, 0x10, &lock90, 1);
-        cxd6801_i2c_read(&demod.i2c_demod, 0x91, 0x10, &lock91, 1);
-        cxd6801_i2c_read(&demod.i2c_demod, 0x95, 0x40, &alp, 1);
+        /* Read several lock-status registers — values vary by mode */
+        uint8_t r20 = 0, r91 = 0, r95 = 0;
+        cxd6801_i2c_read(&demod.i2c_demod, 0x20, 0x10, &r20, 1);  /* ATSC1 lock */
+        cxd6801_i2c_read(&demod.i2c_demod, 0x91, 0x10, &r91, 1);  /* ATSC3 lock */
+        cxd6801_i2c_read(&demod.i2c_demod, 0x95, 0x40, &r95, 1);  /* ATSC3 ALP */
 
-        uint8_t sync_stat = lock90 & 0x07;
-        uint8_t unlock = (lock90 >> 4) & 0x01;
-        uint8_t alp_locked = (alp >> 4) & 0x01;
+        /* SNR + RF level (works even without full lock) */
+        int32_t snr_x100 = 0, rf_dbm = 0;
+        cxd6801_monitor_snr(&demod, &snr_x100);
+        cxd6801_monitor_rf_level(&demod, &rf_dbm);
 
-        const char *flag = "";
-        if (sync_stat >= 6) flag = " ★ LOCKED!";
-        else if (sync_stat >= 3) flag = " ← partial";
-        else if (sync_stat >= 1) flag = " (bootstrap)";
+        uint8_t sync = use_atsc1 ? (r20 & 0x07) : (r91 & 0x07);
 
-        printf("%2d | %7d   | 90:%02x 91:%02x | %d    | %d      | %d%s\n",
-               ch, freq, lock90, lock91, sync_stat, unlock, alp_locked, flag);
+        printf("%2d | %7d | r20=%02x r91=%02x r95=%02x | sync=%d | SNR=%2d.%02d dB | RF=%d dBm\n",
+               ch, freq, r20, r91, r95, sync,
+               snr_x100 / 100, abs(snr_x100) % 100, rf_dbm);
     }
 
     cxd6801_deinit(&demod);
