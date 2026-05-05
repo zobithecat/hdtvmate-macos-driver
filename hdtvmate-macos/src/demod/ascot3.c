@@ -204,8 +204,12 @@ hdtvmate_error_t cxd6801_tuner_i2c_enable(cxd6801_device_t *dev, bool enable)
 }
 
 /* ============================================================
- * Tuner register write — via I2C repeater to addr 0xC0
- * Repeater is enabled/disabled by cxd6801_tuner_tune wrapper.
+ * Tuner register write — via I2C repeater to addr 0xC0.
+ * No 0xF424 wrap — adding it here doesn't fix the SLVT-stuck-after-
+ * tuner-burst problem and only adds USB latency. Sony's drvi2c may
+ * skip the wrap for tuner writes (flags & 0x02 path); without source
+ * we can't tell, but the empirical result is that wrapping 0xC0
+ * doesn't help.
  * ============================================================ */
 static hdtvmate_error_t ascot3_write_regs(cxd6801_device_t *dev,
                                            uint8_t reg, const uint8_t *data, uint8_t len)
