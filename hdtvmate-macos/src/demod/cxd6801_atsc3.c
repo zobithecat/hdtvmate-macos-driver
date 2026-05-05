@@ -27,6 +27,40 @@
 
 extern void br_user_delay(uint32_t ms);
 extern uint64_t br_user_time_ms(void);
+extern hdtvmate_error_t br_cmd_write_registers(it9300_device_t *dev,
+                                                uint8_t processor,
+                                                uint32_t addr,
+                                                const uint8_t *values, uint8_t len);
+
+/* Hardware power-cycle + reset the demod chip via IT9300 GPIOs.
+ *
+ * Found by ADB logcat capture of HDTV Player on LineageOS UTM:
+ *   SonyPHYAndroid::tune (mode 5 = ATSC 3.0) is preceded by
+ *     _setPwrEn[0]  → D8E3 = 0 (chip Vdd off)
+ *     _setPwrEn[1]  → D8E3 = 1 (chip Vdd on)
+ *
+ * Combine with D8B7 (demod reset) toggle so the chip starts in a
+ * fully-known state, like the very first call to it9300_initialize. */
+static hdtvmate_error_t cxd6801_chip_power_cycle(it9300_device_t *bridge)
+{
+    uint8_t val;
+    LOG_INFO("Chip power cycle + reset: D8E3 + D8B7");
+
+    /* Power off */
+    val = 0x00; br_cmd_write_registers(bridge, 1, 0xD8E3, &val, 1);
+    /* Hold reset asserted while power is off */
+    val = 0x00; br_cmd_write_registers(bridge, 1, 0xD8B7, &val, 1);
+    br_user_delay(500);
+
+    /* Power on */
+    val = 0x01; br_cmd_write_registers(bridge, 1, 0xD8E3, &val, 1);
+    br_user_delay(200);
+    /* Release reset */
+    val = 0x01; br_cmd_write_registers(bridge, 1, 0xD8B7, &val, 1);
+    br_user_delay(500);
+
+    return HDTVMATE_OK;
+}
 
 /*
  * ATSC 3.0 bandwidth configuration registers
@@ -218,6 +252,32 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 
     if (!dev->initialized) {
         return HDTVMATE_ERR_DEMOD_INIT;
+    }
+
+    /* Step 0: Power-cycle the chip and re-initialize. Sony's app does
+     * this on every ATSC 3.0 (mode 5) tune attempt — see logcat
+     * `_setPwrEn[0]` → `_setPwrEn[1]` sequence. Without it, the SLVT
+     * write path gets NACK-locked after the X_tune burst. With it,
+     * each tune starts from a clean chip state. */
+    cxd6801_chip_power_cycle(dev->bridge);
+
+    /* After power cycle, the demod has lost its register state. Re-run
+     * the parts of cxd6801_initialize that prepare the chip: chip ID
+     * read (probe), XtoSL state transition, then TunerI2cEnable. */
+    {
+        extern hdtvmate_error_t cxd6801_read_chip_id(cxd6801_device_t *dev);
+        cxd6801_read_chip_id(dev);
+
+        /* Re-run XtoSL: mark device as not-yet-initialized so cxd6801_initialize
+         * does the full sequence. cxd6801_initialize also calls tuner_init,
+         * which will re-confirm tuner ID = 0xE1. */
+        dev->initialized = false;
+        dev->tuner_initialized = false;
+        ret = cxd6801_initialize(dev);
+        if (ret != HDTVMATE_OK) {
+            LOG_ERR("Re-init after power cycle failed");
+            return ret;
+        }
     }
 
     /* Step 1: Ensure sleep state */
