@@ -157,6 +157,12 @@ hdtvmate_error_t cxd6801_atsc3_tune_end(cxd6801_device_t *dev);
 hdtvmate_error_t cxd6801_atsc3_check_demod_lock(cxd6801_device_t *dev, bool *locked);
 hdtvmate_error_t cxd6801_atsc3_check_alp_lock(cxd6801_device_t *dev, bool *locked);
 hdtvmate_error_t cxd6801_atsc3_wait_lock(cxd6801_device_t *dev, uint32_t timeout_ms);
+
+/* Sony's CW (continuous wave / pilot) tracking step. Polls and writes
+ * frequency-offset corrections until the demod's auto-detect state
+ * machine clears its CW-pending flag. Without this, sync_stat parks at
+ * 1 (bootstrap detected) and never reaches frame sync. */
+hdtvmate_error_t cxd6801_atsc3_wait_cw_tracking(cxd6801_device_t *dev);
 hdtvmate_error_t cxd6801_atsc3_set_plp_config(cxd6801_device_t *dev,
                                                 const uint8_t *plp_ids, uint8_t count);
 hdtvmate_error_t cxd6801_atsc3_sleep(cxd6801_device_t *dev);

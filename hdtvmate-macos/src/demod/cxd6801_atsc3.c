@@ -586,6 +586,143 @@ hdtvmate_error_t cxd6801_atsc3_check_alp_lock(cxd6801_device_t *dev, bool *locke
     return HDTVMATE_OK;
 }
 
+/*
+ * sony_cxd6801_demod_atsc3_AutoDetectSeq_SetCWTracking @ 0xed05c
+ *
+ * Reads continuous-wave / pilot tracking status from bank 0x9A reg 0x46
+ * (10 bytes). When valid CW info is present, computes a frequency-offset
+ * correction value and writes it back to bank 0x9A regs 0x3E (3 bytes),
+ * 0x3C, and 0xC6. Without this active correction, the demod's
+ * auto-detect state machine stays parked at sync_stat=1 (bootstrap
+ * detected, frame sync never acquired).
+ *
+ * Returns HDTVMATE_OK and sets *done = 0 when CW tracking is complete,
+ * or *done = 1 when still in progress (caller should poll again).
+ *
+ * The math (cw_v2 - 0x4000) * scale / bw is fixed-point arithmetic
+ * extracted directly from the Sony binary at offsets ed360..ed378.
+ */
+static hdtvmate_error_t cxd6801_atsc3_set_cw_tracking(cxd6801_device_t *dev,
+                                                      uint8_t *done)
+{
+    hdtvmate_error_t ret;
+    uint8_t cw_buf[10];
+    uint8_t signal_type_byte;
+    uint32_t scale_factor, bw_divisor;
+
+    if (!dev || !done) return HDTVMATE_ERR_INVALID_PARAM;
+
+    /* Read 10-byte CW tracking status from bank 0x9A reg 0x46 */
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x9A, 0x46, cw_buf, 10);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* Bit 0 of byte 0 == 0 means CW tracking already complete. */
+    if (!(cw_buf[0] & 0x01)) {
+        *done = 0;
+        return HDTVMATE_OK;
+    }
+
+    /* Parse CW info (big-endian-ish packed fields).
+     * cw_v0 = buf[1..4] big-endian   (32-bit signal magnitude?)
+     * cw_v1 = bits from buf[5..7]    (signal threshold metric)
+     * cw_v2 = bits from buf[8..9]    (CW frequency offset, 15-bit signed) */
+    uint32_t cw_v0 = ((uint32_t)cw_buf[1] << 24) | ((uint32_t)cw_buf[2] << 16)
+                   | ((uint32_t)cw_buf[3] << 8)  | cw_buf[4];
+    uint32_t cw_v1 = (((uint32_t)cw_buf[5] & 0x01) << 16)
+                   | ((uint32_t)cw_buf[6] << 8) | cw_buf[7];
+    uint32_t cw_v2 = (((uint32_t)cw_buf[8] & 0x7F) << 8) | cw_buf[9];
+
+    /* Sanity check 1: cw_v1 must be ≥ 10001 */
+    if (cw_v1 < 0x2711) {
+        *done = 1;
+        return HDTVMATE_OK;
+    }
+
+    /* Sanity check 2: cw_v1 must exceed cw_v0 / 200 (fixed-point scaled).
+     * Sony uses (cw_v0 * 0x51EB851F) >> 38, equivalent to cw_v0 / 200. */
+    uint32_t threshold = (uint32_t)(((uint64_t)cw_v0 * 0x51EB851FULL) >> 38);
+    if (cw_v1 <= threshold) {
+        *done = 1;
+        return HDTVMATE_OK;
+    }
+
+    /* Read signal-type byte from bank 0x90 reg 0x5C (top 3 bits classify
+     * the OFDM signal type; selects the scale factor for the offset calc). */
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x90, 0x5C, &signal_type_byte, 1);
+    if (ret != HDTVMATE_OK) return ret;
+
+    uint8_t st = signal_type_byte >> 5;
+    if (st == 1)      scale_factor = 0xC0;  /* 192 */
+    else if (st == 4) scale_factor = 0x60;  /* 96 */
+    else if (st == 5) scale_factor = 0x30;  /* 48 */
+    else {
+        /* Unknown signal type — Sony returns error 4 here */
+        *done = 1;
+        return HDTVMATE_OK;
+    }
+
+    /* Bandwidth divisor: 6/7/8 MHz. We always tune at 6 MHz for ATSC 3.0. */
+    bw_divisor = 6;
+
+    /* Compute correction: signed (cw_v2 - 0x4000) scaled and divided */
+    int32_t cw_v2_signed = (int32_t)cw_v2 - 0x4000;
+    int32_t offset = (cw_v2_signed * (int32_t)scale_factor)
+                   / (int32_t)bw_divisor;
+    uint32_t offset_u = (uint32_t)offset;
+
+    /* Pack into 3-byte big-endian buffer. Sony only keeps low 2 bits of MSB. */
+    uint8_t off_buf[3];
+    off_buf[0] = (uint8_t)((offset_u >> 16) & 0x03);
+    off_buf[1] = (uint8_t)((offset_u >> 8) & 0xFF);
+    off_buf[2] = (uint8_t)(offset_u & 0xFF);
+
+    /* Write the correction values to bank 0x9A */
+    ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9A, 0x3E, off_buf, 3);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9A, 0x3C, 0x04);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9A, 0xC6, 0x0C);
+    if (ret != HDTVMATE_OK) return ret;
+
+    *done = 1;  /* Correction written; tracking still in progress */
+    return HDTVMATE_OK;
+}
+
+/*
+ * atsc3_WaitCWTracking @ 0x1062dc
+ *
+ * Polls SetCWTracking every 10 ms for up to 300 ms. Each poll reads
+ * status, and (when status is valid) writes a refined frequency-offset
+ * correction to the chip. Returns HDTVMATE_OK once *done becomes 0.
+ */
+hdtvmate_error_t cxd6801_atsc3_wait_cw_tracking(cxd6801_device_t *dev)
+{
+    const uint32_t timeout_ms = 300;
+    uint64_t start = br_user_time_ms();
+    int iterations = 0;
+
+    LOG_DBG("WaitCWTracking: polling (timeout=%u ms)", timeout_ms);
+
+    while ((br_user_time_ms() - start) < timeout_ms) {
+        uint8_t done = 1;
+        hdtvmate_error_t ret = cxd6801_atsc3_set_cw_tracking(dev, &done);
+        if (ret != HDTVMATE_OK) {
+            LOG_WARN("SetCWTracking error %d at iter %d (continuing)",
+                     ret, iterations);
+        } else if (done == 0) {
+            LOG_INFO("CW tracking acquired after %d iterations (%llu ms)",
+                     iterations,
+                     (unsigned long long)(br_user_time_ms() - start));
+            return HDTVMATE_OK;
+        }
+        iterations++;
+        br_user_delay(10);
+    }
+
+    LOG_WARN("WaitCWTracking timeout after %d iterations", iterations);
+    return HDTVMATE_ERR_NO_LOCK;
+}
+
 hdtvmate_error_t cxd6801_atsc3_wait_lock(cxd6801_device_t *dev, uint32_t timeout_ms)
 {
     /*
@@ -601,6 +738,13 @@ hdtvmate_error_t cxd6801_atsc3_wait_lock(cxd6801_device_t *dev, uint32_t timeout
 
     LOG_DBG("Waiting for ATSC 3.0 lock (timeout=%u ms)...", timeout_ms);
 
+    /* Sony's flow: WaitDemodLock (poll until sync_stat≥6) → WaitCWTracking
+     * → WaitALPLock. WaitCWTracking only runs AFTER demod is locked —
+     * empirically bank 0x9A returns NACK on bank-select before lock,
+     * suggesting the chip gates that bank behind partial lock. */
+
+    bool cw_tracked = false;
+
     while ((br_user_time_ms() - start) < timeout_ms) {
         /* Check demod lock first */
         if (!demod_locked) {
@@ -611,7 +755,16 @@ hdtvmate_error_t cxd6801_atsc3_wait_lock(cxd6801_device_t *dev, uint32_t timeout
             }
         }
 
-        /* Once demod is locked, check ALP lock */
+        /* Once demod is locked, run CW tracking (only legal after lock —
+         * bank 0x9A returns NACK before lock). Then check ALP lock. */
+        if (demod_locked && !cw_tracked) {
+            hdtvmate_error_t cw_ret = cxd6801_atsc3_wait_cw_tracking(dev);
+            if (cw_ret != HDTVMATE_OK) {
+                LOG_DBG("WaitCWTracking did not fully converge — proceeding to ALP");
+            }
+            cw_tracked = true;  /* run only once per lock attempt */
+        }
+
         if (demod_locked) {
             cxd6801_atsc3_check_alp_lock(dev, &alp_locked);
             if (alp_locked) {
