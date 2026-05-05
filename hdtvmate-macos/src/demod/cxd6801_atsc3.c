@@ -127,33 +127,35 @@ static hdtvmate_error_t cxd6801_atsc3_auto_detect_seq_init(cxd6801_device_t *dev
 {
     hdtvmate_error_t ret;
 
-    LOG_DBG("AutoDetectSeq_Init: bank 0x90 setup");
+    LOG_DBG("AutoDetectSeq_Init: bank 0x90/0x9A/0x9B setup");
 
-    /* Sony writes 0 here for fresh tunes; UnlockCase toggles bit 0 to
-     * recover from unlock_detected (spectrum inversion). We tested both
-     * 0 and 1 — neither got us out of sync_stat=1, so the issue is
-     * upstream of spectrum inversion. */
+    /* AutoDetectSeq_Init: bank 0x90 reg 0xF3 = 0 (detect-running flag) */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0xF3, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* initCWDetection */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x9A, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x38, 0x04);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x9B, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x11, 0x20);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x9A, 0x00);
+    /* initCWDetection — Sony's actual sequence (verified via Frida-hooked
+     * trace of the running app). The ARM disassembly was misread earlier:
+     * `mov w3, #0x9A` followed by reg=0 means BANK-SELECT to 0x9A, NOT a
+     * write to register 0x9A. So initCWDetection ops live in banks 0x9A
+     * and 0x9B, NOT bank 0x90 as we had them. */
+
+    /* Bank 0x9A: reg 0x38 = 0x04 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9A, 0x38, 0x04);
     if (ret != HDTVMATE_OK) return ret;
 
+    /* Bank 0x9B: reg 0x11 = 0x20 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9B, 0x11, 0x20);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* Bank 0x9A: reg 0x3C = 8 bytes {05,05,00,00,00,00,00,00} */
     {
         uint8_t cw_data[8] = { 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
-        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x90, 0x3C, cw_data, 8);
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9A, 0x3C, cw_data, 8);
         if (ret != HDTVMATE_OK) return ret;
     }
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x50, 0x05);
+
+    /* Bank 0x9A: reg 0x50 = 0x05 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9A, 0x50, 0x05);
     return ret;
 }
 
@@ -185,7 +187,9 @@ static hdtvmate_error_t cxd6801_atsc3_set_plp_config_internal(cxd6801_device_t *
 
     ret = cxd6801_i2c_write(&dev->i2c_demod, 0x93, 0x80, buf, 4);
     if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x85, 0x00);
+    /* Sony writes 0x01 here (verified via Frida-hooked trace of running app);
+     * comes from device->[0x2a6] which is set during init, not 0 as we had. */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x85, 0x01);
     if (ret != HDTVMATE_OK) return ret;
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x9C, 0x01);
     return ret;
@@ -333,18 +337,31 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* Bank 0x10: reg 0xA5 = 0x00 (no IQ inversion) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xA5, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-
     /* Bank 0x10: reg 0xA6 = ITB coefficients (14 bytes)
-     * Extracted from binary .rodata at offset 0x3cbf8 */
+     * Extracted from binary .rodata at offset 0x3cbf8.
+     * Sony writes A6 BEFORE A5 — verified via Frida-hooked trace. */
     {
         uint8_t itbCoef[14] = {
             0x31, 0xA8, 0x29, 0x9B, 0x27, 0x9C, 0x28,
             0x9E, 0x29, 0xA4, 0x29, 0xA2, 0x29, 0xA8
         };
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x10, 0xA6, itbCoef, 14);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* Bank 0x10: reg 0xA5 = 0x01.
+     * Was 0x00 in our code (mis-read as "no IQ inversion"). Frida trace
+     * shows Sony writes 0x01 here — comes from device->[0x280] flag. */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xA5, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* Bank 0x10: reg 0xB6 = 3 bytes {0x13, 0x33, 0x33} — IF freq config.
+     * This was the "opaque IF config table" we couldn't extract from the
+     * binary (loaded at runtime via SetIFFreqConfig from device->[0x25c..0x25e]).
+     * Frida trace of the running app captured the actual bytes. */
+    {
+        uint8_t ifFreqCfg[3] = {0x13, 0x33, 0x33};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x10, 0xB6, ifFreqCfg, 3);
         if (ret != HDTVMATE_OK) return ret;
     }
 
