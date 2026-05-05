@@ -146,34 +146,32 @@ static int ascot3_freq_range(uint32_t freq_khz)
  * ============================================================ */
 static hdtvmate_error_t cxd6801_i2c_repeater_enable(cxd6801_device_t *dev, bool enable)
 {
-    /*
-     * From Ghidra decompile of sony_cxd6801_demod_I2cRepeaterEnable():
-     *   WriteOneRegister(pI2c, i2cAddressSLVX, 0x08, enable)
-     *
-     * i2cAddressSLVX is a separate I2C sub-address on the demod.
-     * In our single-address I2C implementation:
-     *   Bank 0x00, reg 0x08 = repeater enable (CONFIRMED from Ghidra)
-     */
-    uint8_t val = enable ? 0x01 : 0x00;
-    return cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, val);
+    /* ASCOT3 is internal — no I2C repeater needed.
+     * Tuner accessed directly via SLVT bank 0x60.
+     * Keep function as no-op for API compatibility. */
+    (void)dev; (void)enable;
+    return HDTVMATE_OK;
 }
 
 /* ============================================================
- * Tuner register write (through I2C repeater)
- * ASCOT3 tuner registers are flat (no bank select needed)
- * Write format: [reg_addr, data...]
+ * Tuner register write — via SLVT bank 0x60
+ *
+ * ASCOT3 tuner is INTERNAL to CXD6801 (no separate I2C slave).
+ * Tuner registers are mapped at SLVT bank 0x60.
+ * Confirmed: bank 0x60 reg 0x7F = 0x41 (ASCOT3 ID).
  * ============================================================ */
+#define ASCOT3_BANK  0x60
+
 static hdtvmate_error_t ascot3_write_regs(cxd6801_device_t *dev,
                                            uint8_t reg, const uint8_t *data, uint8_t len)
 {
-    /* ASCOT3 tuner uses flat register space (bank=0x00 is a no-op) */
-    return cxd6801_i2c_write(&dev->i2c_tuner, 0x00, reg, data, len);
+    return cxd6801_i2c_write(&dev->i2c_demod, ASCOT3_BANK, reg, data, len);
 }
 
 static hdtvmate_error_t ascot3_set_reg_bits(cxd6801_device_t *dev,
                                              uint8_t reg, uint8_t mask, uint8_t value)
 {
-    return cxd6801_i2c_set_bits(&dev->i2c_tuner, 0x00, reg, mask, value);
+    return cxd6801_i2c_set_bits(&dev->i2c_demod, ASCOT3_BANK, reg, mask, value);
 }
 
 /* ============================================================
