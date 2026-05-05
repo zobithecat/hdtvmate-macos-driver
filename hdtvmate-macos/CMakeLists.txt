@@ -82,5 +82,9 @@ target_link_libraries(post_android_test hdtvmate_core)
 add_executable(no_reset_probe src/tools/no_reset_probe.c)
 target_link_libraries(no_reset_probe hdtvmate_core)
 
+# --- Channel sweep 14-30 ---
+add_executable(scan_14_30 src/tools/scan_14_30.c)
+target_link_libraries(scan_14_30 hdtvmate_core)
+
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)

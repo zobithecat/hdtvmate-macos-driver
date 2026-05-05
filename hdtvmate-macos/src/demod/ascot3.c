@@ -503,7 +503,11 @@ hdtvmate_error_t cxd6801_tuner_tune(cxd6801_device_t *dev, uint32_t frequency_kh
     hdtvmate_error_t ret;
     uint8_t tv_system;
 
-    /* Map bandwidth/standard to tvSystem enum */
+    /* Tested entries [0], [6], [9] for ATSC 3.0 — all gave identical
+     * Lock reg = 0xD9 (syncStat=1, OFDM bootstrap detected, no full
+     * demod lock). g_param_table front-end values don't determine lock
+     * outcome on this antenna; signal strength does. Reverting to the
+     * real ATSC 3.0 entry [0] (matches binary).  */
     switch (dev->state) {
     case CXD6801_STATE_ACTIVE_ATSC3:
         tv_system = TV_SYSTEM_ATSC3;
@@ -515,7 +519,6 @@ hdtvmate_error_t cxd6801_tuner_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         tv_system = TV_SYSTEM_J83B;
         break;
     default:
-        /* Default to ATSC 3.0 */
         tv_system = TV_SYSTEM_ATSC3;
         break;
     }
