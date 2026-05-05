@@ -207,7 +207,7 @@ hdtvmate_error_t cxd6801_tuner_i2c_enable(cxd6801_device_t *dev, bool enable)
 
 /* ============================================================
  * Tuner register write — via I2C repeater to addr 0xC0.
- * Single transaction (no chunking; chunking didn't reduce SLVT NACKs).
+ * Single transaction.
  * ============================================================ */
 static hdtvmate_error_t ascot3_write_regs(cxd6801_device_t *dev,
                                            uint8_t reg, const uint8_t *data, uint8_t len)
