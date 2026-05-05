@@ -73,15 +73,12 @@ static hdtvmate_error_t i2c_raw_read(cxd6801_i2c_t *i2c, uint8_t *data, uint8_t 
  */
 static hdtvmate_error_t cxd6801_i2c_select_bank(cxd6801_i2c_t *i2c, uint8_t bank)
 {
-    /*
-     * Bank select via 0xC8 (SLV-T write address).
-     * Confirmed working in UTM Linux VM test:
-     *   CMD 0x2B [2, bus=3, addr=0xC8, 0x00, bank] → bank applied to both 0xC8 and 0xDC
-     */
+    /* Bank select: write [0x00, bank] to SLVT addr (0xD8).
+     * CONFIRMED: 0xD8 bank select + 0xD8 write + 0xD8 read ALL work! */
     uint8_t tx[8];
     tx[0] = 2;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_WRITE;  /* 0xC8 */
+    tx[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
     tx[3] = 0x00;
     tx[4] = bank;
     return br_cmd_send(i2c->bridge, 0x002B, tx, 5, NULL, 0);
@@ -135,33 +132,21 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
      * CMD 0x2A combined (4-byte) format was tested but returned 0xFF/0x00
      * on this firmware version. Using split: write reg ptr + read.
      */
-    /*
-     * Read sequence — bank select via 0xC8, reg ptr via 0xC8, read via 0xC8.
-     * Sony uses same deviceAddress for all three operations.
-     * Read uses CMD 0x2A with just [len, bus, addr] (no reg in payload).
-     * The device remembers the reg pointer from the previous write.
-     */
-
-    /* Bank select via 0xC8, reg pointer + read via 0xDC.
-     * This is the only combination that works on this device:
-     * - 0xC8: write-only (bank select + data write)
-     * - 0xDC: read-capable (reg pointer + data read)
-     * Bank state from 0xC8 IS shared with 0xDC (confirmed in VM). */
-    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xC8: [0x00, bank] */
+    /* All SLVT ops via 0xD8 — CONFIRMED WORKING!
+     * bank select [0x00, bank] + reg ptr [reg] + read via CMD 0x2A */
+    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xD8 */
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Reg pointer via 0xDC */
     tx_reg[0] = 1;
     tx_reg[1] = i2c->i2c_bus;
-    tx_reg[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
+    tx_reg[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
     tx_reg[3] = reg;
     ret = br_cmd_send(i2c->bridge, 0x002B, tx_reg, 4, NULL, 0);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Read via 0xDC */
     tx_reg[0] = len;
     tx_reg[1] = i2c->i2c_bus;
-    tx_reg[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
+    tx_reg[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
     ret = br_cmd_send(i2c->bridge, 0x002A, tx_reg, 3, data, len);
 
     LOG_DBG("I2C read: bank=0x%02x reg=0x%02x len=%d data=%02x %02x -> %s",
@@ -219,7 +204,7 @@ hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
 
     tx[0] = len + 1;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_WRITE;  /* 0xC8 for SLV-T writes */
+    tx[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 — CONFIRMED WORKING */
     tx[3] = reg;
     memcpy(&tx[4], data, len);
     ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);

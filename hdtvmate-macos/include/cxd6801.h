@@ -26,13 +26,23 @@
  */
 
 /* CXD6801 I2C addresses (8-bit format, as used by Endeavour/IT9300)
- * Confirmed by I2C bus scan: Bus=3, Addr=0xC8 responds!
- * Valid addresses from sony_cxd6801_demod_Create: 0xC8, 0xCA, 0xD8, 0xDA
+ *
+ * From sony_cxd6801_demod_Create Ghidra decompile:
+ *   SLVT = create_param (0xC8, 0xCA, 0xD8, 0xDA valid)
+ *   SLVX = SLVT + 4
+ *
+ * THIS DEVICE: SLVT=0xD8, SLVX=0xDC (confirmed by write/read test!)
+ *   0xD8: SLV-T — bank select + register write + read (MAIN DEMOD)
+ *   0xDC: SLV-X — flat register space (no bank), init/control
+ *   0xC8: responds to bank select only, NOT writable for data regs
+ *   0xC0: ASCOT3 tuner (from Android app I2C error log)
  */
-#define CXD6801_I2C_ADDR_WRITE  0xC8   /* Demod WRITE address - CONFIRMED */
-#define CXD6801_I2C_ADDR_READ   0xDC   /* Demod READ address - CONFIRMED */
-#define CXD6801_I2C_ADDR_DEMOD  0xC8   /* Alias for write addr */
-#define CXD6801_I2C_ADDR_TUNER  0xC2   /* ASCOT3 tuner */
+#define CXD6801_I2C_ADDR_SLVT   0xD8   /* SLV-T: main demod (bank-based) */
+#define CXD6801_I2C_ADDR_SLVX   0xDC   /* SLV-X: extended (flat, no bank) */
+#define CXD6801_I2C_ADDR_WRITE  0xD8   /* Alias for SLVT */
+#define CXD6801_I2C_ADDR_READ   0xDC   /* Legacy alias (SLVX) */
+#define CXD6801_I2C_ADDR_DEMOD  0xD8   /* Alias for SLVT */
+#define CXD6801_I2C_ADDR_TUNER  0xC0   /* ASCOT3 tuner (from Android log) */
 #define CXD6801_I2C_BUS         0x03   /* I2C bus number - CONFIRMED */
 
 /* Chip IDs */

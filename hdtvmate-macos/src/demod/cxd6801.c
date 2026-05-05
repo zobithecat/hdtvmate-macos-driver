@@ -170,9 +170,9 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         br_user_delay(4);
 
         /* SLVT bank 0x95, reg 0x23 = 0x03 (for chipId 0x396) */
-        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_WRITE; tx[3]=0x00; tx[4]=0x95;
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVT; tx[3]=0x00; tx[4]=0x95;
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
-        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_WRITE; tx[3]=0x23; tx[4]=0x03;
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVT; tx[3]=0x23; tx[4]=0x03;
         ret = br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
     }
 
