@@ -146,32 +146,77 @@ static int ascot3_freq_range(uint32_t freq_khz)
  * ============================================================ */
 static hdtvmate_error_t cxd6801_i2c_repeater_enable(cxd6801_device_t *dev, bool enable)
 {
-    /* ASCOT3 is internal — no I2C repeater needed.
-     * Tuner accessed directly via SLVT bank 0x60.
-     * Keep function as no-op for API compatibility. */
-    (void)dev; (void)enable;
-    return HDTVMATE_OK;
+    /*
+     * I2C Repeater enable: BOTH registers required!
+     *   1. SLVT bank 0x00 reg 0x1A = enable
+     *   2. SLVX reg 0x08 = enable
+     * Confirmed by brute-force test: only this combo opens 0xC0 tuner path.
+     */
+    hdtvmate_error_t ret;
+    uint8_t val = enable ? 0x01 : 0x00;
+    uint8_t tx[8];
+
+    /* SLVT bank 0x00 reg 0x1A */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, val);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVX reg 0x08 (direct write to 0xDC) */
+    tx[0] = 2; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_SLVX;
+    tx[3] = 0x08; tx[4] = val;
+    extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
+                                         const uint8_t *tx_data, uint8_t tx_len,
+                                         uint8_t *rx_data, uint8_t rx_len);
+    ret = br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+    return ret;
 }
 
 /* ============================================================
- * Tuner register write — via SLVT bank 0x60
+ * Tuner register write — via I2C repeater to addr 0xC0
  *
- * ASCOT3 tuner is INTERNAL to CXD6801 (no separate I2C slave).
- * Tuner registers are mapped at SLVT bank 0x60.
- * Confirmed: bank 0x60 reg 0x7F = 0x41 (ASCOT3 ID).
+ * ASCOT3 tuner is accessed via CXD6801's I2C repeater:
+ *   1. Enable repeater (SLVT 0x1A + SLVX 0x08)
+ *   2. Write to I2C addr 0xC0 (tuner)
+ *   3. Disable repeater
+ *
+ * Repeater is enabled/disabled by cxd6801_tuner_tune wrapper.
+ * These functions assume repeater is already enabled!
  * ============================================================ */
-#define ASCOT3_BANK  0x60
-
 static hdtvmate_error_t ascot3_write_regs(cxd6801_device_t *dev,
                                            uint8_t reg, const uint8_t *data, uint8_t len)
 {
-    return cxd6801_i2c_write(&dev->i2c_demod, ASCOT3_BANK, reg, data, len);
+    /* Direct write to tuner addr 0xC0 (repeater must be enabled) */
+    uint8_t tx[64];
+    extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
+                                         const uint8_t *tx_data, uint8_t tx_len,
+                                         uint8_t *rx_data, uint8_t rx_len);
+    if (len + 4 > sizeof(tx)) return HDTVMATE_ERR_INVALID_PARAM;
+    tx[0] = len + 1;
+    tx[1] = CXD6801_I2C_BUS;
+    tx[2] = CXD6801_I2C_ADDR_TUNER;  /* 0xC0 */
+    tx[3] = reg;
+    memcpy(&tx[4], data, len);
+    return br_cmd_send(dev->bridge, 0x002B, tx, len + 4, NULL, 0);
 }
 
 static hdtvmate_error_t ascot3_set_reg_bits(cxd6801_device_t *dev,
                                              uint8_t reg, uint8_t mask, uint8_t value)
 {
-    return cxd6801_i2c_set_bits(&dev->i2c_demod, ASCOT3_BANK, reg, mask, value);
+    uint8_t data, tx[8];
+    hdtvmate_error_t ret;
+    extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
+                                         const uint8_t *tx_data, uint8_t tx_len,
+                                         uint8_t *rx_data, uint8_t rx_len);
+    /* Read current value from tuner */
+    tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER; tx[3]=reg;
+    br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
+    tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER;
+    ret = br_cmd_send(dev->bridge, 0x002A, tx, 3, &data, 1);
+    if (ret != HDTVMATE_OK) return ret;
+
+    data = (data & ~mask) | (value & mask);
+
+    tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER; tx[3]=reg; tx[4]=data;
+    return br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
 }
 
 /* ============================================================
@@ -376,13 +421,19 @@ hdtvmate_error_t cxd6801_tuner_init(cxd6801_device_t *dev)
     ret = cxd6801_i2c_repeater_enable(dev, true);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Read tuner chip ID to verify communication */
+    /* Read tuner chip ID via 0xC0 (repeater must be enabled) */
     uint8_t tuner_id = 0;
-    ret = cxd6801_i2c_read(&dev->i2c_tuner, 0x00, 0x7F, &tuner_id, 1);
-    if (ret == HDTVMATE_OK) {
-        LOG_INFO("ASCOT3 tuner ID: 0x%02x", tuner_id);
+    {
+        uint8_t tx[8];
+        tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER; tx[3]=0x7F;
+        br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
+        tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER;
+        ret = br_cmd_send(dev->bridge, 0x002A, tx, 3, &tuner_id, 1);
+    }
+    if (ret == HDTVMATE_OK && tuner_id != 0xC1) {
+        LOG_INFO("ASCOT3 tuner ID: 0x%02x (repeater OK!)", tuner_id);
     } else {
-        LOG_WARN("Could not read tuner ID (ret=%d)", ret);
+        LOG_WARN("Tuner ID: 0x%02x (repeater may not be working)", tuner_id);
     }
 
     /* ASCOT3 power-on initialization:
