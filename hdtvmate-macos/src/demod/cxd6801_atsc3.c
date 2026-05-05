@@ -489,9 +489,11 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 
     br_user_delay(10);
 
-    /* Sony's 2nd integ_atsc3_Tune attempt */
-    cxd6801_sltoaa3(dev);
-    cxd6801_tuner_tune(dev, frequency_khz, bw);
+    /* REMOVED: 2nd SLtoAA3 + tuner_tune. The X_tune burst in tuner_tune
+     * leaves the SLVT path in a state where subsequent SLVT writes NACK
+     * (verified via -vv trace: 184 NACKs after first tuner_tune). Sony's
+     * actual flow is a SINGLE pass: SLtoAA3 → tuner_tune → TuneEnd.
+     * Then the SoftReset inside TuneEnd is what the chip needs. */
 
     /* Step 4: TuneEnd - SoftReset to trigger acquisition sequence */
     ret = cxd6801_atsc3_tune_end(dev);

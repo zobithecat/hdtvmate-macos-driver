@@ -164,11 +164,10 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
 
         /* SLVX reg 0x14 = xtalFreq (0=20.5MHz, 1=24MHz, 2=41MHz).
-         * Frida trace of v2.32 HDTV Player on the same hardware writes 0x01,
-         * meaning the device has a 24 MHz crystal. Earlier guess of 0x00
-         * (20.5 MHz) was wrong — wrong XTAL skews ALL frequency calculations
-         * (IF, sampling rate, nominalRate), preventing demod lock. */
-        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x14; tx[4]=0x01;
+         * Reverted to 0x00 — chip-ID read goes garbage when we set 0x01,
+         * suggesting the actual XTAL on this device is 20.5 MHz, not 24 MHz
+         * as the v2.32 trace suggested. (Different HW revisions perhaps.) */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x14; tx[4]=0x00;
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
         br_user_delay(2);
 

@@ -81,6 +81,8 @@ int main(int argc, char *argv[])
             std = BROADCAST_ATSC3;
         } else if (strcmp(argv[i], "-v") == 0) {
             g_log_level = LOG_DEBUG;
+        } else if (strcmp(argv[i], "-vv") == 0) {
+            g_log_level = LOG_TRACE;
         } else if (strcmp(argv[i], "-q") == 0) {
             g_log_level = LOG_ERROR;
         } else if (argv[i][0] != '-') {

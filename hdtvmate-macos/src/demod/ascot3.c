@@ -559,6 +559,17 @@ hdtvmate_error_t cxd6801_tuner_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 done:
     /* Disable I2C repeater */
     cxd6801_i2c_repeater_enable(dev, false);
+
+    /* The tuner X_tune burst (the 17-byte write to reg 0x68 plus the
+     * preceding burst) leaves the SLVT path NACKing for a brief window.
+     * Sony's binary on the same hardware doesn't show this — possibly
+     * because they sequence things differently or do something we don't
+     * see. Empirically a small delay here lets the chip's internal I2C
+     * bridge recover and accept SLVT writes again. */
+    {
+        extern void br_user_delay(uint32_t ms);
+        br_user_delay(50);
+    }
     return ret;
 }
 
