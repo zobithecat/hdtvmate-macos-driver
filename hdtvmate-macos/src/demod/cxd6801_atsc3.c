@@ -380,6 +380,15 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         }
     }
 
+    /* Tested: SetConfig case 0x00/0x01/0x02 all map to bank 0 reg 0xC4
+     * bits 7/3/4 — neither polarity changed Lock reg (still 0xD9).
+     * Conclusion: KOREAN_MODE in Sony's binary is most likely a
+     * software-only flag (logcat printout) without actual chip
+     * register effect, OR it lives in a register we haven't found.
+     * Default reg 0xC4 = 0x29 confirms chip already has bits 0/3/5
+     * set, so app's "Korean OFF" default isn't gating anything we
+     * can see. */
+
     /* Step 2: SLtoAA3 - Sleep to Active ATSC 3.0 mode transition */
     ret = cxd6801_sltoaa3(dev);
     if (ret != HDTVMATE_OK) {
