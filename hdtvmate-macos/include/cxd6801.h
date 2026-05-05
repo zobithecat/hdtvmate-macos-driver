@@ -146,6 +146,10 @@ hdtvmate_error_t cxd6801_tuner_tune(cxd6801_device_t *dev, uint32_t frequency_kh
                                      cxd6801_bandwidth_t bw);
 hdtvmate_error_t cxd6801_tuner_sleep(cxd6801_device_t *dev);
 
+/* One-time tuner I2C bus enable (SLVX reg 0x1A = 1).
+ * Must be called once after XtoSL, before any tuner access. */
+hdtvmate_error_t cxd6801_tuner_i2c_enable(cxd6801_device_t *dev, bool enable);
+
 /* --- ATSC 3.0 operations --- */
 hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_khz,
                                      cxd6801_bandwidth_t bw);

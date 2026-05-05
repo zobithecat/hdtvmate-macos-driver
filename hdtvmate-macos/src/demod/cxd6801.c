@@ -195,20 +195,40 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
     }
     LOG_INFO("XtoSL: done");
 
-    /*
-     * Step 3: Configure ALP/TS clock mode
-     * From binary: sony_cxd6801_demod_SetALPClockModeAndFreq()
-     * and sony_cxd6801_demod_SetTSClockModeAndFreq()
-     *
-     * TODO: These exact values need extraction from binary.
-     * Placeholder values based on CXD2880 reference.
-     */
-
-    /* Step 4: Stream output configuration */
-    /* sony_cxd6801_demod_SetStreamOutput() */
-
     dev->state = CXD6801_STATE_SLEEP;
     dev->initialized = true;
+
+    /* Tuner I2C path warm-up.
+     *
+     * Empirically, the very first tuner access NACKs unless we run a
+     * "warm-up" cycle first: SLVT bank 0 reg 0x1A=1 + SLVX reg 0x08=1
+     * + dummy tuner read (NACKs, but generates SCL clocks that prime
+     * the chip) + clean disable.
+     *
+     * After this warm-up, per-access SLVX reg 0x1A toggle gates the
+     * repeater path correctly. Hypothesis: SLVT bank 0 reg 0x1A and
+     * SLVX reg 0x1A are aliases for the same physical "tuner I2C
+     * routing enable" register; SLVX is the safe access path because
+     * writing it doesn't get intercepted by the routing itself.
+     */
+    {
+        uint8_t tx[8], junk;
+
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, 0x01);
+        tx[0] = 2; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_SLVX;
+        tx[3] = 0x08; tx[4] = 0x01;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        tx[0] = 1; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_TUNER;
+        tx[3] = 0x7F;
+        br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
+        tx[0] = 1; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_TUNER;
+        br_cmd_send(dev->bridge, 0x002A, tx, 3, &junk, 1);
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, 0x00);
+        tx[0] = 2; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_SLVX;
+        tx[3] = 0x08; tx[4] = 0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+    }
+    br_user_delay(10);
 
     /* Initialize tuner (ASCOT3) */
     ret = cxd6801_tuner_init(dev);
