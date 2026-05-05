@@ -188,8 +188,28 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
+    /* MISSING WRITES from Sony SLtoAA3 (extracted from binary @0xeaafc).
+     * These run before the SLVX 0x17 clock-enable and are critical for
+     * the demod's acquisition pipeline to actually start. */
+
+    /* SLVT bank 3 reg 0xB6 = 0 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x03, 0xB6, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x9D reg 0xF1 = 1 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9D, 0xF1, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x95 reg 0x90 = 0 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x90, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
     /* SLVX bank 0x00: reg 0x17 = 0x0E (enable ATSC3 clock) */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0E);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0 reg 0x36 = 1 (also missing previously) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x36, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
     /* SLVT bank 0x00: output mode = ALP (0x02) */
