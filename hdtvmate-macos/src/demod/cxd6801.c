@@ -22,8 +22,11 @@
  * Bank 0x60: Tuner (ASCOT3) registers
  */
 
-/* External timing function */
+/* External functions */
 extern void br_user_delay(uint32_t ms);
+extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
+                                     const uint8_t *tx_data, uint8_t tx_len,
+                                     uint8_t *rx_data, uint8_t rx_len);
 extern uint64_t br_user_time_ms(void);
 
 hdtvmate_error_t cxd6801_create(cxd6801_device_t *dev, it9300_device_t *bridge,
@@ -117,26 +120,67 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
     }
 
     /*
-     * Demodulator initialization sequence.
+     * XtoSL - Unknown to Sleep state transition
+     * From Ghidra decompile of XtoSL() at 0xe2a34 (chipId=0x396 branch).
      *
-     * From binary analysis of sony_cxd6801_demod_Initialize():
-     * 1. Software reset
-     * 2. Clock configuration
-     * 3. ALP output configuration
-     * 4. TS output configuration
-     * 5. Internal register defaults
+     * This sequence initializes the demod from power-on state to SLEEP.
+     * CRITICAL: SLVX reg 0x02 = 0x00 may be the "write enable" command
+     * that unlocks SLV-T register writes!
      *
-     * TODO: Extract exact register sequences from Ghidra decompilation.
-     * The following is a framework based on CXD2880 patterns.
+     * All writes use SLVX (0xDC) address directly (flat, no bank).
+     * SLVT (0xC8) writes happen after SLVX init (bank-based).
      */
+    LOG_INFO("XtoSL: initializing demod (chipId=0x%04x)...", dev->chip_id);
 
-    /* Step 1: Software reset (bank 0x00, reg 0xFE = 0x01, confirmed from Ghidra) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xFE, 0x01);
+    /* SLVX writes — direct register access via 0xDC, no bank select needed */
+    /* These go directly to 0xDC as flat registers */
+    {
+        uint8_t tx[8];
+
+        /* SLVX reg 0x02 = 0x00 — possibly "write enable" / power control */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x02; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        br_user_delay(4);
+
+        /* SLVX reg 0x00 = 0x00 */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x00; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+
+        /* SLVX reg 0x1D = 0x00 */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x1D; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+
+        /* SLVX reg 0x14 = xtalFreq (0=20.5MHz, 1=24MHz, 2=41MHz) */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x14; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        br_user_delay(2);
+
+        /* SLVX reg 0x50 = 0x00 */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x50; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+
+        /* SLVX reg 0x90 = 0x00 (conditional in Sony code, include it) */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x90; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        br_user_delay(2);
+
+        /* SLVX reg 0x10 = 0x00 */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x10; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        br_user_delay(4);
+
+        /* SLVT bank 0x95, reg 0x23 = 0x03 (for chipId 0x396) */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_WRITE; tx[3]=0x00; tx[4]=0x95;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_WRITE; tx[3]=0x23; tx[4]=0x03;
+        ret = br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+    }
+
     if (ret != HDTVMATE_OK) {
-        LOG_ERR("Software reset failed");
+        LOG_ERR("XtoSL failed");
         return ret;
     }
-    br_user_delay(10);
+    LOG_INFO("XtoSL: done");
 
     /*
      * Step 3: Configure ALP/TS clock mode

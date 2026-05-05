@@ -207,19 +207,19 @@ hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
     }
 
     /*
-     * Demod write (confirmed from UTM VM test):
-     *   Bank select: CMD 0x2B [2, bus, 0xC8, 0x00, bank]
-     *   Reg write:   CMD 0x2B [len+1, bus, 0xC8, reg, data...]
-     * Both use 0xC8 (write address). Bank state shared with read (0xDC).
+     * Demod write — Sony uses same addr (0xC8) for bank select AND data write.
+     * SLV-T registers (bank 0x00+): use 0xC8
+     * SLV-X registers (reg 0x17, 0x18 in bank 0x00): use 0xDC
+     *
+     * Bank select: CMD 0x2B [2, bus, 0xC8, 0x00, bank]
+     * Data write:  CMD 0x2B [len+1, bus, 0xC8, reg, data...]
      */
     ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xC8: [0x00, bank] */
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Data write via 0xDC — works for both SLV-T and SLV-X registers.
-     * Bank select (0xC8) sets the bank, then 0xDC write goes to that bank. */
     tx[0] = len + 1;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_READ;  /* 0xDC */
+    tx[2] = CXD6801_I2C_ADDR_WRITE;  /* 0xC8 for SLV-T writes */
     tx[3] = reg;
     memcpy(&tx[4], data, len);
     ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);
