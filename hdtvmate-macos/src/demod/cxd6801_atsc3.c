@@ -386,8 +386,12 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* Enable stream output: bank 0x02, reg 0xC0 = 0x00 (enable ALP output) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xC0, 0x00);
+    /* Enable stream output: bank 0x00 reg 0xC3 = 0x01 (TS data pin enable).
+     * Frida-hooked v2.32/v2.42 trace shows Sony writes 0x00 then 0x01 here,
+     * NOT bank 0x02 reg 0xC0 as we had. */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
     /* Final step from Sony SLtoAA3 (binary @ 0xeb340..0xeb388):
