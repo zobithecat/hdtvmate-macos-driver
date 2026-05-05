@@ -204,13 +204,14 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x90, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVX bank 0x00: reg 0x17 = 0x0E (enable ATSC3 clock) */
+    /* SLVX bank 0x00: reg 0x17 = 0x0E (enable ATSC3 clock).
+     * Note: SLVX uses i2c_demod_x context — we route through i2c_demod
+     * since our wrapper handles the slave-address selection internally. */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0E);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0 reg 0x36 = 1 (also missing previously) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x36, 0x01);
-    if (ret != HDTVMATE_OK) return ret;
+    /* NOTE: removed reg 0x36 = 1 — that path is gated on [device+0x2d0]==1
+     * (EAS / Emergency Alert state). For normal tuning we skip it. */
 
     /* SLVT bank 0x00: output mode = ALP (0x02) */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x02);
@@ -255,28 +256,32 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x7B, 0x10);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0x9C: reg 0x50 (5 bytes) - Normal EAS state */
+    /* SLVT bank 0x9C: Normal-mode (non-EAS) configuration block.
+     * Re-extracted byte-by-byte from binary @ 0xeb1d8..0xeb314.
+     * Previous values had 3 corrupted bytes that broke acquisition. */
+
+    /* reg 0x50 (5 bytes): w8=0xC0094093 LE → {93,40,09,C0}, then sturb #1 → 0x01 */
     {
-        uint8_t data[5] = {0x93, 0x40, 0x09, 0xC0, 0x00};
+        uint8_t data[5] = {0x93, 0x40, 0x09, 0xC0, 0x01};
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0x50, data, 5);
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* SLVT bank 0x9C: reg 0x65 (5 bytes) */
+    /* reg 0x65 (5 bytes): w8=0x40D3 → {D3,40,00,00}, then strb wzr → 0x00 */
     {
-        uint8_t data[5] = {0xD3, 0x40, 0x00, 0x1C, 0x1D};
+        uint8_t data[5] = {0xD3, 0x40, 0x00, 0x00, 0x00};
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0x65, data, 5);
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* SLVT bank 0x9C: reg 0xD4 (3 bytes) */
+    /* reg 0xD4 (3 bytes): strh #0xD801 → {01,D8}, strb #0x1C → 0x1C */
     {
-        uint8_t data[3] = {0x01, 0xD8, 0x1D};
+        uint8_t data[3] = {0x01, 0xD8, 0x1C};
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0xD4, data, 3);
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* SLVT bank 0x9C: reg 0xE0 (3 bytes) */
+    /* reg 0xE0 (3 bytes): strh #0xD801 → {01,D8}, strb #0x1D → 0x1D */
     {
         uint8_t data[3] = {0x01, 0xD8, 0x1D};
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9C, 0xE0, data, 3);
@@ -340,6 +345,17 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     /* Enable stream output: bank 0x02, reg 0xC0 = 0x00 (enable ALP output) */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xC0, 0x00);
     if (ret != HDTVMATE_OK) return ret;
+
+    /* Final step from Sony SLtoAA3 (binary @ 0xeb340..0xeb388):
+     *   1. Bank-select SLVT bank 0x00
+     *   2. SetRegisterBits(SLVT, reg 0x80, val 0x08, mask 0x1F)
+     *      → RMW: clear bits 0x1F at reg 0x80, then OR in (0x08 & 0x1F).
+     * This was previously missing entirely — it gates a critical sub-block. */
+    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0x80, 0x1F, 0x08);
+    if (ret != HDTVMATE_OK) {
+        LOG_ERR("SLtoAA3 final SetRegisterBits at SLVT[0x80] failed");
+        return ret;
+    }
 
     LOG_DBG("SLtoAA3: mode transition + band setting complete");
     return HDTVMATE_OK;
