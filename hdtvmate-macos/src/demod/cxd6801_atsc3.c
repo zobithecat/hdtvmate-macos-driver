@@ -31,6 +31,26 @@ extern hdtvmate_error_t br_cmd_write_registers(it9300_device_t *dev,
                                                 uint8_t processor,
                                                 uint32_t addr,
                                                 const uint8_t *values, uint8_t len);
+extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
+                                     const uint8_t *tx_data, uint8_t tx_len,
+                                     uint8_t *rx_data, uint8_t rx_len);
+
+/* Direct SLVX (0xDC) single-register write — flat address space, no bank.
+ * Sony's SLtoAA3 has two SLVX writes that we were incorrectly routing to
+ * SLVT before the i2c wrapper would silently turn them into bank-selects.
+ * SLVX has its own slave address; we must send the I2C write manually
+ * via the IT9300 bridge command 0x002B. */
+static hdtvmate_error_t cxd6801_slvx_write_one(cxd6801_device_t *dev,
+                                                 uint8_t reg, uint8_t value)
+{
+    uint8_t tx[5];
+    tx[0] = 2;                          /* register address byte count */
+    tx[1] = dev->i2c_demod.i2c_bus;     /* I2C bus index */
+    tx[2] = CXD6801_I2C_ADDR_SLVX;      /* 0xDC */
+    tx[3] = reg;
+    tx[4] = value;
+    return br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+}
 
 /* Hardware power-cycle + reset the demod chip via IT9300 GPIOs.
  *
@@ -204,10 +224,13 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x90, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVX bank 0x00: reg 0x17 = 0x0E (enable ATSC3 clock).
-     * Note: SLVX uses i2c_demod_x context — we route through i2c_demod
-     * since our wrapper handles the slave-address selection internally. */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0E);
+    /* SLVX (0xDC) reg 0x17 = 0x0E — enable ATSC3 clock.
+     * CRITICAL FIX: Previously this was routed to SLVT (0xD8) bank 0x00
+     * via the wrapper, which silently turned it into a bank-select +
+     * register write to a completely different chip block. The SLVX
+     * clock-enable was therefore never happening. SLVX is a flat
+     * register space with its own slave address — must write directly. */
+    ret = cxd6801_slvx_write_one(dev, 0x17, 0x0E);
     if (ret != HDTVMATE_OK) return ret;
 
     /* NOTE: removed reg 0x36 = 1 — that path is gated on [device+0x2d0]==1
@@ -229,8 +252,8 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVX bank 0x00: reg 0x18 = 0x00 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x18, 0x00);
+    /* SLVX (0xDC) reg 0x18 = 0x00 — same SLVX-vs-SLVT routing fix. */
+    ret = cxd6801_slvx_write_one(dev, 0x18, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
     /* SLVT bank 0x11: reg 0x6A = 0x50 */
