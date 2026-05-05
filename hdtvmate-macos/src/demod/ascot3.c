@@ -144,24 +144,30 @@ static int ascot3_freq_range(uint32_t freq_khz)
 /* ============================================================
  * Enable/disable I2C repeater on demod to access tuner
  *
- * Per-access toggle uses ONLY SLVX reg 0x1A (writing to SLVT during
- * a session NACKs because the routing intercepts SLVT writes).
+ * Confirmed working sequence (no_reset_probe Step D, after Android
+ * primed the chip via UTM): write reg 0x1A=val to SLVT (bank 0) AND
+ * reg 0x08=val to SLVX. The SLVX 0x08 is Sony's documented repeater
+ * bit (sony_cxd6801_demod_I2cRepeaterEnable @ 0xe6e6c).
  *
- * The cxd6801_initialize prep cycle (failed-on-purpose tuner access
- * with SLVT 0x1A + SLVX 0x08) flips the chip into a state where SLVX
- * 0x1A is the active repeater gate.
+ * The matching SLVX reg 0x1A "TunerI2cEnable" is a one-time init that
+ * runs in cxd6801_initialize — opens the I2C bus path persistently.
  * ============================================================ */
 static hdtvmate_error_t cxd6801_i2c_repeater_enable(cxd6801_device_t *dev, bool enable)
 {
+    hdtvmate_error_t ret;
     uint8_t val = enable ? 0x01 : 0x00;
     uint8_t tx[8];
     extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
                                          const uint8_t *tx_data, uint8_t tx_len,
                                          uint8_t *rx_data, uint8_t rx_len);
 
-    /* SLVX reg 0x1A = enable (direct write to 0xDC) */
+    /* SLVT bank 0 reg 0x1A = val */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, val);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVX reg 0x08 = val (Sony's I2cRepeaterEnable bit) */
     tx[0] = 2; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_SLVX;
-    tx[3] = 0x1A; tx[4] = val;
+    tx[3] = 0x08; tx[4] = val;
     return br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
 }
 

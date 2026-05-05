@@ -198,37 +198,30 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
     dev->state = CXD6801_STATE_SLEEP;
     dev->initialized = true;
 
-    /* Tuner I2C path warm-up.
+    /* TunerI2cEnable — Sony's exact init step.
      *
-     * Empirically, the very first tuner access NACKs unless we run a
-     * "warm-up" cycle first: SLVT bank 0 reg 0x1A=1 + SLVX reg 0x08=1
-     * + dummy tuner read (NACKs, but generates SCL clocks that prime
-     * the chip) + clean disable.
+     * From sony_cxd6801_demod_TunerI2cEnable @ 0xe3068 (Ghidra):
+     *   SetAndSaveRegisterBits(SLVX_addr, page=0, reg=0x1A, value=1, mask=0xFF)
+     * which expands to:
+     *   1. Write [0x00, 0x00] to SLVX (page select to bank 0 — no-op on
+     *      flat-mapped SLVX but safe)
+     *   2. Read-modify-write SLVX reg 0x1A = 1
      *
-     * After this warm-up, per-access SLVX reg 0x1A toggle gates the
-     * repeater path correctly. Hypothesis: SLVT bank 0 reg 0x1A and
-     * SLVX reg 0x1A are aliases for the same physical "tuner I2C
-     * routing enable" register; SLVX is the safe access path because
-     * writing it doesn't get intercepted by the routing itself.
+     * Replaces the earlier "warm-up" cycle which worked once but kept
+     * pushing the chip into a stuck state on subsequent runs.
      */
     {
-        uint8_t tx[8], junk;
-
-        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, 0x01);
+        uint8_t tx[8];
+        /* SLVX bank/page select to 0 */
         tx[0] = 2; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_SLVX;
-        tx[3] = 0x08; tx[4] = 0x01;
+        tx[3] = 0x00; tx[4] = 0x00;
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
-        tx[0] = 1; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_TUNER;
-        tx[3] = 0x7F;
-        br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
-        tx[0] = 1; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_TUNER;
-        br_cmd_send(dev->bridge, 0x002A, tx, 3, &junk, 1);
-        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x1A, 0x00);
+        /* SLVX reg 0x1A = 1 */
         tx[0] = 2; tx[1] = CXD6801_I2C_BUS; tx[2] = CXD6801_I2C_ADDR_SLVX;
-        tx[3] = 0x08; tx[4] = 0x00;
+        tx[3] = 0x1A; tx[4] = 0x01;
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
     }
-    br_user_delay(10);
+    LOG_INFO("TunerI2cEnable: done (SLVX reg 0x1A = 1)");
 
     /* Initialize tuner (ASCOT3) */
     ret = cxd6801_tuner_init(dev);

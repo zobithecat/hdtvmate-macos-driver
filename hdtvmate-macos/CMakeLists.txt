@@ -74,5 +74,13 @@ target_link_libraries(hdtvmate_eeprom hdtvmate_core)
 add_executable(extended_repeater_brute src/tools/extended_repeater_brute.c)
 target_link_libraries(extended_repeater_brute hdtvmate_core)
 
+# --- Post-Android probe (after Android scan in UTM hands chip back) ---
+add_executable(post_android_test src/tools/post_android_test.c)
+target_link_libraries(post_android_test hdtvmate_core)
+
+# --- No-reset probe (skip GPIO reset to preserve Android's chip state) ---
+add_executable(no_reset_probe src/tools/no_reset_probe.c)
+target_link_libraries(no_reset_probe hdtvmate_core)
+
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)

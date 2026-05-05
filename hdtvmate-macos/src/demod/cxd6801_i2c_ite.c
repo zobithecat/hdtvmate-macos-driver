@@ -192,22 +192,39 @@ hdtvmate_error_t cxd6801_i2c_write(cxd6801_i2c_t *i2c, uint8_t bank,
     }
 
     /*
-     * Demod write — Sony uses same addr (0xC8) for bank select AND data write.
-     * SLV-T registers (bank 0x00+): use 0xC8
-     * SLV-X registers (reg 0x17, 0x18 in bank 0x00): use 0xDC
+     * Demod write with Sony's drvi2c per-transaction wrap:
+     *   IT9300 reg 0xF424 = 1 (no-stop mode on)
+     *   - bank select + reg write
+     *   IT9300 reg 0xF424 = 0 (no-stop mode off)
      *
-     * Bank select: CMD 0x2B [2, bus, 0xC8, 0x00, bank]
-     * Data write:  CMD 0x2B [len+1, bus, 0xC8, reg, data...]
+     * From drvi2c_cxd6801_ite_Write @ 0xdd540 in liba3_phy_sony.so.
+     * Without this wrap, after a burst of tuner (0xC0) writes the SLVT
+     * (0xD8) write path gets stuck and NACKs every subsequent write —
+     * SLtoAA3 only partially applies and the demod never locks.
      */
-    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xC8: [0x00, bank] */
-    if (ret != HDTVMATE_OK) return ret;
+    uint8_t f424_tx[8];
 
-    tx[0] = len + 1;
-    tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 — CONFIRMED WORKING */
-    tx[3] = reg;
-    memcpy(&tx[4], data, len);
-    ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);
+    /* 0xF424 = 1 (CMD 0x0001 reg write, processor=0) */
+    f424_tx[0] = 1; f424_tx[1] = 0;
+    f424_tx[2] = 0x00; f424_tx[3] = 0x00; f424_tx[4] = 0xF4; f424_tx[5] = 0x24;
+    f424_tx[6] = 0x01;
+    br_cmd_send(i2c->bridge, 0x0001, f424_tx, 7, NULL, 0);
+
+    /* Bank select */
+    ret = cxd6801_i2c_select_bank(i2c, bank);
+
+    if (ret == HDTVMATE_OK) {
+        tx[0] = len + 1;
+        tx[1] = i2c->i2c_bus;
+        tx[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
+        tx[3] = reg;
+        memcpy(&tx[4], data, len);
+        ret = br_cmd_send(i2c->bridge, 0x002B, tx, len + 4, NULL, 0);
+    }
+
+    /* 0xF424 = 0 */
+    f424_tx[6] = 0x00;
+    br_cmd_send(i2c->bridge, 0x0001, f424_tx, 7, NULL, 0);
 
     LOG_TRC("I2C write: bank=0x%02x reg=0x%02x len=%d -> %s",
             bank, reg, len, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
