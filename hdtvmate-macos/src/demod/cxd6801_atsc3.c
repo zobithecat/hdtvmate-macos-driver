@@ -254,23 +254,12 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return HDTVMATE_ERR_DEMOD_INIT;
     }
 
-    /* Step 0: Power-cycle the chip and re-initialize. Sony's app does
-     * this on every ATSC 3.0 (mode 5) tune attempt — see logcat
-     * `_setPwrEn[0]` → `_setPwrEn[1]` sequence. Without it, the SLVT
-     * write path gets NACK-locked after the X_tune burst. With it,
-     * each tune starts from a clean chip state. */
+    /* Step 0: Power-cycle the chip and re-initialize.
+     * Sony's app does this on every ATSC 3.0 (mode 5) tune. */
     cxd6801_chip_power_cycle(dev->bridge);
-
-    /* After power cycle, the demod has lost its register state. Re-run
-     * the parts of cxd6801_initialize that prepare the chip: chip ID
-     * read (probe), XtoSL state transition, then TunerI2cEnable. */
     {
         extern hdtvmate_error_t cxd6801_read_chip_id(cxd6801_device_t *dev);
         cxd6801_read_chip_id(dev);
-
-        /* Re-run XtoSL: mark device as not-yet-initialized so cxd6801_initialize
-         * does the full sequence. cxd6801_initialize also calls tuner_init,
-         * which will re-confirm tuner ID = 0xE1. */
         dev->initialized = false;
         dev->tuner_initialized = false;
         ret = cxd6801_initialize(dev);
@@ -280,11 +269,14 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         }
     }
 
-    /* Step 1: Ensure sleep state */
-    if (dev->state == CXD6801_STATE_ACTIVE_ATSC3 ||
-        dev->state == CXD6801_STATE_ACTIVE_ATSC1) {
-        ret = cxd6801_sleep(dev);
-        if (ret != HDTVMATE_OK) return ret;
+    /* Step 1: SoftReset before SLtoAA3.
+     * From DRV_CXD6801_acquireChannel @ 0x1af5fc — Sony calls
+     * sony_cxd6801_demod_SoftReset (bank 0 reg 0xFE = 1) at the
+     * START of every tune, not the end. This resets the chip's
+     * acquisition state machine before applying SLtoAA3. */
+    ret = cxd6801_soft_reset(dev);
+    if (ret != HDTVMATE_OK) {
+        LOG_WARN("SoftReset at tune start failed (continuing)");
     }
 
     /* Step 2: SLtoAA3 - Sleep to Active ATSC 3.0 mode transition */
@@ -294,11 +286,28 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return ret;
     }
 
-    /* Step 3: Tune the ASCOT3 tuner to the target frequency */
+    /* Step 3: Tune the ASCOT3 tuner. Then if it didn't fully lock,
+     * Sony retries the whole atsc3_Tune again after 10ms — first
+     * attempt primes acquisition, second often locks.
+     * Implemented here as: tune → wait → retry-tune.  */
     ret = cxd6801_tuner_tune(dev, frequency_khz, bw);
     if (ret != HDTVMATE_OK) {
         LOG_ERR("Tuner tune failed");
         return ret;
+    }
+
+    /* 10ms gap (matches Sony's `usleep(10000)` between attempts) */
+    br_user_delay(10);
+
+    /* Sony's 2nd integ_atsc3_Tune attempt — retry SLtoAA3 + tuner_tune
+     * to drive any leftover state into lock. */
+    ret = cxd6801_sltoaa3(dev);
+    if (ret == HDTVMATE_OK) {
+        ret = cxd6801_tuner_tune(dev, frequency_khz, bw);
+    }
+    if (ret != HDTVMATE_OK) {
+        LOG_WARN("2nd tune attempt failed (continuing)");
+        ret = HDTVMATE_OK;
     }
 
     /* Step 4: TuneEnd - SoftReset to trigger acquisition sequence */
