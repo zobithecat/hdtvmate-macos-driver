@@ -85,6 +85,88 @@ typedef struct {
  * ALP output mode (ATSC 3.0 normal, non-EAS):
  */
 
+/* sony_cxd6801_demod_atsc3_AutoDetectSeq_Init @ 0xed4ac
+ *
+ * Run after SoftReset and before SLtoAA3, while the demod is still
+ * in SLEEP (state == 2). Configures the bank-0x90 ATSC 3.0 auto-
+ * detect path and the CW-detection sub-block.
+ *
+ * Register sequence (all SLVT, bank-relative writes use our
+ * cxd6801_i2c_write_one helper which selects the bank first):
+ *   bank 0x90:
+ *     reg 0xF3 = 0     // detect-running flag
+ *     reg 0x9A = 0     // CW detection: clear
+ *     reg 0x38 = 4     // (CW-related)
+ *     reg 0x9B = 0
+ *     reg 0x11 = 0x20
+ *     reg 0x9A = 0     // re-clear
+ *     reg 0x3C = {05,05,00,00,00,00,00,00}  // 8 bytes
+ *     reg 0x50 = 5
+ */
+static hdtvmate_error_t cxd6801_atsc3_auto_detect_seq_init(cxd6801_device_t *dev)
+{
+    hdtvmate_error_t ret;
+
+    LOG_DBG("AutoDetectSeq_Init: bank 0x90 setup");
+
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0xF3, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* initCWDetection */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x9A, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x38, 0x04);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x9B, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x11, 0x20);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x9A, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    {
+        uint8_t cw_data[8] = { 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x90, 0x3C, cw_data, 8);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0x50, 0x05);
+    return ret;
+}
+
+/* sony_cxd6801_demod_atsc3_SetPLPConfig @ 0xec054
+ *
+ * Configures which PLPs (Physical Layer Pipes) the demod will track.
+ * Each PLP byte gets bit 0x80 set (presumably "valid" flag).
+ *
+ * For HDTV Mate's typical case (1 PLP, ID 0): plp_ids = [0x80, 0, 0, 0]
+ *   bank 0x93:
+ *     reg 0x80 = [plp0|0x80, plp1|0x80 or 0, plp2..., plp3...]  (4 bytes)
+ *     reg 0x85 = (demod->[0x2a6] != 0) ? 1 : 0   // we use 0 (default)
+ *     reg 0x9C = 1
+ */
+static hdtvmate_error_t cxd6801_atsc3_set_plp_config_internal(cxd6801_device_t *dev,
+                                                                uint8_t num_plps,
+                                                                const uint8_t *plp_ids)
+{
+    hdtvmate_error_t ret;
+    uint8_t buf[4] = {0, 0, 0, 0};
+
+    if (num_plps > 4) num_plps = 4;
+    for (uint8_t i = 0; i < num_plps && i < 4; i++) {
+        buf[i] = plp_ids[i] | 0x80;
+    }
+
+    LOG_DBG("SetPLPConfig: %d PLPs, buf={%02x %02x %02x %02x}",
+            num_plps, buf[0], buf[1], buf[2], buf[3]);
+
+    ret = cxd6801_i2c_write(&dev->i2c_demod, 0x93, 0x80, buf, 4);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x85, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x9C, 0x01);
+    return ret;
+}
+
 /*
  * SLtoAA3 - Sleep to Active ATSC 3.0 mode transition
  * Applies the full register initialization sequence from Ghidra decompile.
@@ -269,14 +351,33 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         }
     }
 
-    /* Step 1: SoftReset before SLtoAA3.
-     * From DRV_CXD6801_acquireChannel @ 0x1af5fc — Sony calls
-     * sony_cxd6801_demod_SoftReset (bank 0 reg 0xFE = 1) at the
-     * START of every tune, not the end. This resets the chip's
-     * acquisition state machine before applying SLtoAA3. */
+    /* Step 1: SoftReset before SLtoAA3 (Sony's acquireChannel does this) */
     ret = cxd6801_soft_reset(dev);
     if (ret != HDTVMATE_OK) {
         LOG_WARN("SoftReset at tune start failed (continuing)");
+    }
+
+    /* Step 1.5: AutoDetectSeq_Init + SetPLPConfig.
+     * Sony's integ_atsc3_Tune @ 0x105d90 calls these BEFORE
+     * demod_atsc3_Tune (= SLtoAA3). The auto-detect sequence configures
+     * bank 0x90 acquisition pipe; PLP config selects which PLP(s) the
+     * demod tracks. Without these, the chip may pick wrong defaults
+     * for ATSC 3.0 acquisition.
+     *
+     * Both must run while demod is still in SLEEP — they use SLVT
+     * writes which work fine here, but get NACK-locked after X_tune. */
+    ret = cxd6801_atsc3_auto_detect_seq_init(dev);
+    if (ret != HDTVMATE_OK) {
+        LOG_WARN("AutoDetectSeq_Init failed (continuing)");
+    }
+
+    /* SetPLPConfig with single PLP id=0 (default for most ATSC 3.0 channels) */
+    {
+        uint8_t plp[1] = { 0 };
+        ret = cxd6801_atsc3_set_plp_config_internal(dev, 1, plp);
+        if (ret != HDTVMATE_OK) {
+            LOG_WARN("SetPLPConfig failed (continuing)");
+        }
     }
 
     /* Step 2: SLtoAA3 - Sleep to Active ATSC 3.0 mode transition */
