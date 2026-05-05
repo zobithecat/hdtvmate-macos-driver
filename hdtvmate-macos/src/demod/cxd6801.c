@@ -63,26 +63,39 @@ hdtvmate_error_t cxd6801_read_chip_id(cxd6801_device_t *dev)
      * CXD6801 likely uses similar register layout.
      */
     /*
-     * From sony_cxd6801_demod_ChipID disassembly:
+     * From Ghidra decompile of sony_cxd6801_demod_ChipID:
+     * Uses SLVX (0xDC) address, NOT SLVT!
+     * WriteOneRegister(SLVX, 0x00, 0x00) then ReadRegister(SLVX, 0xFB/0xFD)
      * chip_id = (reg[0xFB] & 0x03) << 8 | reg[0xFD]
-     * Both from bank 0x00.
      */
     uint8_t reg_fb = 0, reg_fd = 0;
+    uint8_t tx[8];
 
-    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xFB, &reg_fb, 1);
+    /* Read chip ID via SLVX (0xDC) — flat register, no bank */
+    /* Set reg ptr 0xFB */
+    tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVX; tx[3]=0xFB;
+    br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
+    /* Read */
+    tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVX;
+    ret = br_cmd_send(dev->bridge, 0x002A, tx, 3, &reg_fb, 1);
     if (ret != HDTVMATE_OK) {
-        LOG_ERR("Failed to read reg 0xFB");
+        LOG_ERR("Failed to read SLVX reg 0xFB");
         return ret;
     }
 
-    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xFD, &reg_fd, 1);
+    /* Set reg ptr 0xFD */
+    tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVX; tx[3]=0xFD;
+    br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
+    /* Read */
+    tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVX;
+    ret = br_cmd_send(dev->bridge, 0x002A, tx, 3, &reg_fd, 1);
     if (ret != HDTVMATE_OK) {
-        LOG_ERR("Failed to read reg 0xFD");
+        LOG_ERR("Failed to read SLVX reg 0xFD");
         return ret;
     }
 
-    LOG_INFO("Chip ID regs (addr=0x%02x): 0xFB=0x%02x, 0xFD=0x%02x => 0x%04x",
-             dev->i2c_demod.i2c_addr, reg_fb, reg_fd,
+    LOG_INFO("Chip ID regs (SLVX=0xDC): 0xFB=0x%02x, 0xFD=0x%02x => 0x%04x",
+             CXD6801_I2C_ADDR_SLVX, reg_fb, reg_fd,
              ((uint16_t)(reg_fb & 0x03) << 8) | reg_fd);
     dev->chip_id = ((uint16_t)(reg_fb & 0x03) << 8) | reg_fd;
 
