@@ -227,8 +227,7 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* Step 2: SLtoAA3 - Sleep to Active ATSC 3.0 mode transition
-     * From Ghidra decompile of SLtoAA3() at 0xeaafc */
+    /* Step 2: SLtoAA3 - Sleep to Active ATSC 3.0 mode transition */
     ret = cxd6801_sltoaa3(dev);
     if (ret != HDTVMATE_OK) {
         LOG_ERR("SLtoAA3 mode transition failed");
@@ -246,14 +245,11 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
     ret = cxd6801_atsc3_tune_end(dev);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Step 5: Re-apply BandSetting AFTER SoftReset
-     * SoftReset clears some registers, so rewrite critical ones */
+    /* Step 5: Re-apply BandSetting AFTER SoftReset */
     {
-        /* Bank 0x90: nominalRate for 6MHz */
         uint8_t nominalRate[5] = {0x1B, 0xC7, 0x1C, 0x71, 0xC7};
         cxd6801_i2c_write(&dev->i2c_demod, 0x90, 0x9F, nominalRate, 5);
 
-        /* Bank 0x10: ITB coefficients */
         uint8_t itbCoef[14] = {
             0x31, 0xA8, 0x29, 0x9B, 0x27, 0x9C, 0x28,
             0x9E, 0x29, 0xA4, 0x29, 0xA2, 0x29, 0xA8
@@ -261,13 +257,11 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         cxd6801_i2c_write(&dev->i2c_demod, 0x10, 0xA6, itbCoef, 14);
         cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xD7, 0x04);
 
-        /* Bank 0x1D: filter data */
         uint8_t filterData[10] = {
             0x01, 0x1E, 0xC3, 0x3E, 0xC2, 0x79, 0x84, 0x1E, 0xC3, 0x3E
         };
         cxd6801_i2c_write(&dev->i2c_demod, 0x1D, 0xBF, filterData, 10);
 
-        /* Bank 0x99: */
         uint8_t data4[4] = {0xDE, 0x39, 0x0D, 0xE4};
         cxd6801_i2c_write(&dev->i2c_demod, 0x99, 0x89, data4, 4);
     }

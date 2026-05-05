@@ -70,5 +70,9 @@ target_link_libraries(hdtvmate_gpio hdtvmate_core)
 add_executable(hdtvmate_eeprom src/tools/eeprom_dump.c)
 target_link_libraries(hdtvmate_eeprom hdtvmate_core)
 
+# --- Extended brute force (debug tool for stuck-repeater recovery) ---
+add_executable(extended_repeater_brute src/tools/extended_repeater_brute.c)
+target_link_libraries(extended_repeater_brute hdtvmate_core)
+
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)

@@ -199,19 +199,11 @@ hdtvmate_error_t cxd6801_tuner_i2c_enable(cxd6801_device_t *dev, bool enable)
 
 /* ============================================================
  * Tuner register write — via I2C repeater to addr 0xC0
- *
- * ASCOT3 tuner is accessed via CXD6801's I2C repeater:
- *   1. Enable repeater (SLVT 0x1A + SLVX 0x08)
- *   2. Write to I2C addr 0xC0 (tuner)
- *   3. Disable repeater
- *
  * Repeater is enabled/disabled by cxd6801_tuner_tune wrapper.
- * These functions assume repeater is already enabled!
  * ============================================================ */
 static hdtvmate_error_t ascot3_write_regs(cxd6801_device_t *dev,
                                            uint8_t reg, const uint8_t *data, uint8_t len)
 {
-    /* Direct write to tuner addr 0xC0 (repeater must be enabled) */
     uint8_t tx[64];
     extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
                                          const uint8_t *tx_data, uint8_t tx_len,
