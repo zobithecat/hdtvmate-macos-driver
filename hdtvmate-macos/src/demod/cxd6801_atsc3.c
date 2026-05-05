@@ -129,6 +129,10 @@ static hdtvmate_error_t cxd6801_atsc3_auto_detect_seq_init(cxd6801_device_t *dev
 
     LOG_DBG("AutoDetectSeq_Init: bank 0x90 setup");
 
+    /* Sony writes 0 here for fresh tunes; UnlockCase toggles bit 0 to
+     * recover from unlock_detected (spectrum inversion). We tested both
+     * 0 and 1 — neither got us out of sync_stat=1, so the issue is
+     * upstream of spectrum inversion. */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0xF3, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
