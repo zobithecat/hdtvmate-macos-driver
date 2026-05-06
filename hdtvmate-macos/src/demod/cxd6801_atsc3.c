@@ -203,98 +203,123 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
 {
     hdtvmate_error_t ret;
 
-    LOG_DBG("SLtoAA3: applying mode transition registers...");
+    LOG_DBG("SLtoAA3: applying mode transition (Sony v2.32 lock-success sequence)...");
 
-    /* SetALPClockModeAndFreq - must be called before mode transition.
-     * From Ghidra decompile at 0xe8820:
-     * Bank 0x00: reg 0x32=0, reg 0x33=clock_divider, reg 0x32=1 (clock enable)
-     * Bank 0x95: reg 0x11=0x60 (ALP clock frequency) */
+    /* === Sony's exact sequence captured via Frida hook on v2.32 LOCK SUCCESS ===
+     * Source: spawn-mode capture, lock register reached 0x06 (sync_stat=6 LOCKED).
+     * This sequence is taken verbatim from the running app's I2C trace. */
+
+    /* (1) Bank 0x00 reg 0xC4: Korean mode bit 7 set first (0x29 → 0xA9). */
+    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xC4, 0x80, 0x80);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* (2) Bank 0x02 reg 0xE4 = 0x00 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xE4, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* (3) Bank 0x00 reg 0xC4: clear bit 3 (0xA9 → 0xA1) */
+    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xC4, 0x08, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* (4) AutoDetectSeq_Init / initCWDetection — bank 0x90 + 0x9A + 0x9B */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x90, 0xF3, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9A, 0x38, 0x04);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9B, 0x11, 0x20);
+    if (ret != HDTVMATE_OK) return ret;
+    {
+        uint8_t cw_data[8] = { 0x05, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 };
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x9A, 0x3C, cw_data, 8);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9A, 0x50, 0x05);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* (5) PLP config — bank 0x93 */
+    {
+        uint8_t plp_data[4] = {0x80, 0x00, 0x00, 0x00};
+        ret = cxd6801_i2c_write(&dev->i2c_demod, 0x93, 0x80, plp_data, 4);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x85, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x93, 0x9C, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* (6) Bank 0x00 init writes — D3, DE, DA, C4 (re-confirm), D1, D9 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xD3, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xDE, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xDA, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+    /* re-confirm C4 = 0xA1 (Sony writes again here) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA1);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xD1, 0x01);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xD9, 0x08);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* (7) Clock setup: reg 0x32=0, 0x33=1, 0x32=1 */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x00);
     if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x33, 0x00);
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x33, 0x01);
     if (ret != HDTVMATE_OK) return ret;
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* MISSING WRITES from Sony SLtoAA3 (extracted from binary @0xeaafc).
-     * These run before the SLVX 0x17 clock-enable and are critical for
-     * the demod's acquisition pipeline to actually start. */
-
-    /* SLVT bank 3 reg 0xB6 = 0 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x03, 0xB6, 0x00);
+    /* (8) Bank 0x01 reg 0xE7 = 0x00 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x01, 0xE7, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0x9D reg 0xF1 = 1 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x9D, 0xF1, 0x01);
+    /* (9) Bank 0x10 reg 0x66 = 0x01 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0x66, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0x95 reg 0x90 = 0 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x90, 0x00);
+    /* (10) Bank 0x40 reg 0x66 = 0x01 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x40, 0x66, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVX (0xDC) reg 0x17 = 0x0F — enable ATSC3 clock.
-     * Frida trace of v2.32 shows Sony writes 0x0F here (not 0x0E).
-     * Differs by 1 bit from our earlier guess. */
-    ret = cxd6801_slvx_write_one(dev, 0x17, 0x0F);
+    /* (11) Bank 0x95 reg 0x11 = 0x5C (ALP clock frequency — was 0x60 wrong) */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x11, 0x5C);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0x00 reg 0xC4: Korean ATSC 3.0 mode bits.
-     * Frida trace of v2.32 captured the actual sequence:
-     *   1. Read reg 0xC4 → 0x29 (initial)
-     *   2. Write 0xA9 (set bit 7 = "Korean mode" or some region flag)
-     *   3. (later) Read 0xA9 → write 0xA1 (clear bit 3)
-     * We do both writes here; the chip cares about the FINAL value. */
-    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xC4, 0x80, 0x80);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xC4, 0x08, 0x00);
+    /* (12) Bank 0x02 reg 0xE7 = 0x01 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xE7, 0x01);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* NOTE: removed reg 0x36 = 1 — that path is gated on [device+0x2d0]==1
-     * (EAS / Emergency Alert state). For normal tuning we skip it. */
-
-    /* SLVT bank 0x00: output mode = 0x00 (TS, NOT ALP).
-     * Frida trace of v2.32 shows Sony writes 0x00 here, not 0x02 as our
-     * earlier extraction had. The 0x02 = ALP value comes from a different
-     * code path; for the Korean ATSC 3.0 case Sony uses 0x00. */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
+    /* (13) SLVX (0xDC) reg 0x17 = 0x0E (was 0x0F wrong, lock-success trace shows 0x0E) */
+    ret = cxd6801_slvx_write_one(dev, 0x17, 0x0E);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0x00: system select = ATSC 3.0 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);
+    /* (14) Bank 0x00 mode/system select */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);  /* output = TS */
     if (ret != HDTVMATE_OK) return ret;
-
-    /* SLVT bank 0x00: reg 0x4B = 0x74 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);  /* system = ATSC3 */
+    if (ret != HDTVMATE_OK) return ret;
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x74);
     if (ret != HDTVMATE_OK) return ret;
-
-    /* SLVT bank 0x00: reg 0x49 = 0x00 */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVX (0xDC) reg 0x18 = 0x00 — same SLVX-vs-SLVT routing fix. */
+    /* (15) SLVX (0xDC) reg 0x18 = 0x00 */
     ret = cxd6801_slvx_write_one(dev, 0x18, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVT bank 0x11: reg 0x6A = 0x50 */
+    /* (16) Bank 0x11 control */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x11, 0x6A, 0x50);
     if (ret != HDTVMATE_OK) return ret;
-
-    /* SLVT bank 0x11: reg 0x33 = {0x00, 0x03, 0x3B} */
     {
         uint8_t data[3] = {0x00, 0x03, 0x3B};
         ret = cxd6801_i2c_write(&dev->i2c_demod, 0x11, 0x33, data, 3);
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* SLVT bank 0x95: ALP clock freq from SetALPClockModeAndFreq */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x11, 0x60);
-    if (ret != HDTVMATE_OK) return ret;
-
-    /* SLVT bank 0x95: reg 0x79 = 0x10 */
+    /* (17) Bank 0x95 reg 0x79, 0x7B */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x79, 0x10);
     if (ret != HDTVMATE_OK) return ret;
-
-    /* SLVT bank 0x95: reg 0x7B = 0x10 */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x7B, 0x10);
     if (ret != HDTVMATE_OK) return ret;
 
@@ -397,24 +422,25 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* Enable stream output: bank 0x00 reg 0xC3 = 0x01 (TS data pin enable).
-     * Frida-hooked v2.32/v2.42 trace shows Sony writes 0x00 then 0x01 here,
-     * NOT bank 0x02 reg 0xC0 as we had. */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x01);
-    if (ret != HDTVMATE_OK) return ret;
-
-    /* Final step from Sony SLtoAA3 (binary @ 0xeb340..0xeb388):
-     *   1. Bank-select SLVT bank 0x00
-     *   2. SetRegisterBits(SLVT, reg 0x80, val 0x08, mask 0x1F)
-     *      → RMW: clear bits 0x1F at reg 0x80, then OR in (0x08 & 0x1F).
-     * This was previously missing entirely — it gates a critical sub-block. */
+    /* Final SetRegisterBits operations on bank 0x00 (from lock-success trace):
+     *   reg 0x80: read 0x3F → write 0x28 (clear bits 0x1F, set 0x08) */
     ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0x80, 0x1F, 0x08);
     if (ret != HDTVMATE_OK) {
-        LOG_ERR("SLtoAA3 final SetRegisterBits at SLVT[0x80] failed");
+        LOG_ERR("SLtoAA3 SetRegisterBits at SLVT[0x80] failed");
         return ret;
     }
+
+    /*   reg 0x81: clear bit 0 (write 0xFE) — observed in lock-success trace */
+    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0x81, 0x01, 0x00);
+    if (ret != HDTVMATE_OK) {
+        LOG_ERR("SLtoAA3 SetRegisterBits at SLVT[0x81] failed");
+        return ret;
+    }
+
+    /* Stream output enable: bank 0x00 reg 0xC3 = 0x00 (only).
+     * Lock-success trace shows Sony writes 0x00 here, NOT 0x01 as before. */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
+    if (ret != HDTVMATE_OK) return ret;
 
     LOG_DBG("SLtoAA3: mode transition + band setting complete");
     return HDTVMATE_OK;
@@ -510,26 +536,11 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
     ret = cxd6801_atsc3_tune_end(dev);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Step 5: Re-apply BandSetting AFTER SoftReset */
-    {
-        uint8_t nominalRate[5] = {0x1B, 0xC7, 0x1C, 0x71, 0xC7};
-        cxd6801_i2c_write(&dev->i2c_demod, 0x90, 0x9F, nominalRate, 5);
-
-        uint8_t itbCoef[14] = {
-            0x31, 0xA8, 0x29, 0x9B, 0x27, 0x9C, 0x28,
-            0x9E, 0x29, 0xA4, 0x29, 0xA2, 0x29, 0xA8
-        };
-        cxd6801_i2c_write(&dev->i2c_demod, 0x10, 0xA6, itbCoef, 14);
-        cxd6801_i2c_write_one(&dev->i2c_demod, 0x10, 0xD7, 0x04);
-
-        uint8_t filterData[10] = {
-            0x01, 0x1E, 0xC3, 0x3E, 0xC2, 0x79, 0x84, 0x1E, 0xC3, 0x3E
-        };
-        cxd6801_i2c_write(&dev->i2c_demod, 0x1D, 0xBF, filterData, 10);
-
-        uint8_t data4[4] = {0xDE, 0x39, 0x0D, 0xE4};
-        cxd6801_i2c_write(&dev->i2c_demod, 0x99, 0x89, data4, 4);
-    }
+    /* REMOVED: Step 5 BandSetting re-apply.
+     * Sony's lock-success trace shows NO BandSetting writes after
+     * SoftReset — only one read of reg 0xA9, write reg 0xC3=0x00, then
+     * lock check loop. Our re-apply was generating extra NACKs and
+     * possibly stomping on chip state. */
 
     dev->state = CXD6801_STATE_ACTIVE_ATSC3;
     dev->frequency_khz = frequency_khz;
