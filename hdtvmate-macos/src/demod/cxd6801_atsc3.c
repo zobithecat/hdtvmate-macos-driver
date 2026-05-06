@@ -232,20 +232,31 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x95, 0x90, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SLVX (0xDC) reg 0x17 = 0x0E — enable ATSC3 clock.
-     * CRITICAL FIX: Previously this was routed to SLVT (0xD8) bank 0x00
-     * via the wrapper, which silently turned it into a bank-select +
-     * register write to a completely different chip block. The SLVX
-     * clock-enable was therefore never happening. SLVX is a flat
-     * register space with its own slave address — must write directly. */
-    ret = cxd6801_slvx_write_one(dev, 0x17, 0x0E);
+    /* SLVX (0xDC) reg 0x17 = 0x0F — enable ATSC3 clock.
+     * Frida trace of v2.32 shows Sony writes 0x0F here (not 0x0E).
+     * Differs by 1 bit from our earlier guess. */
+    ret = cxd6801_slvx_write_one(dev, 0x17, 0x0F);
+    if (ret != HDTVMATE_OK) return ret;
+
+    /* SLVT bank 0x00 reg 0xC4: Korean ATSC 3.0 mode bits.
+     * Frida trace of v2.32 captured the actual sequence:
+     *   1. Read reg 0xC4 → 0x29 (initial)
+     *   2. Write 0xA9 (set bit 7 = "Korean mode" or some region flag)
+     *   3. (later) Read 0xA9 → write 0xA1 (clear bit 3)
+     * We do both writes here; the chip cares about the FINAL value. */
+    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xC4, 0x80, 0x80);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xC4, 0x08, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
     /* NOTE: removed reg 0x36 = 1 — that path is gated on [device+0x2d0]==1
      * (EAS / Emergency Alert state). For normal tuning we skip it. */
 
-    /* SLVT bank 0x00: output mode = ALP (0x02) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x02);
+    /* SLVT bank 0x00: output mode = 0x00 (TS, NOT ALP).
+     * Frida trace of v2.32 shows Sony writes 0x00 here, not 0x02 as our
+     * earlier extraction had. The 0x02 = ALP value comes from a different
+     * code path; for the Korean ATSC 3.0 case Sony uses 0x00. */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
     /* SLVT bank 0x00: system select = ATSC 3.0 */
