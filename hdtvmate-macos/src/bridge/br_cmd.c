@@ -127,11 +127,16 @@ hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
 
     int tx_frame_len = initial_len + 2;  /* total frame bytes */
 
-    LOG_TRC("CMD 0x%02x seq=%d: TX[%d]=%02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x",
-            cmd, tx_buf[3], tx_frame_len,
-            tx_buf[0], tx_buf[1], tx_buf[2], tx_buf[3],
-            tx_buf[4], tx_buf[5], tx_buf[6], tx_buf[7],
-            tx_buf[8], tx_buf[9], tx_buf[10]);
+    /* Hex-dump the entire TX frame for debugging */
+    {
+        char hex[256] = {0};
+        int n = (tx_frame_len < 32) ? tx_frame_len : 32;
+        for (int i = 0; i < n; i++) {
+            snprintf(hex + i*3, 4, "%02x ", tx_buf[i]);
+        }
+        LOG_TRC("CMD 0x%02x seq=%d: TX[%d]=%s",
+                cmd, tx_buf[3], tx_frame_len, hex);
+    }
 
     /* Send command */
     ret = br_user_bus_tx(dev->usb, tx_buf, tx_frame_len);

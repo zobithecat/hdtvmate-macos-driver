@@ -414,26 +414,42 @@ static hdtvmate_error_t ascot3_x_tune(cxd6801_device_t *dev,
          * [15]: fixed 0x03
          * [16]: fixed 0x00
          */
-        rf_agc[0] = param[6 + range];   /* RF filter for this freq range */
-        rf_agc[1] = param[3 + range];   /* Gain for this freq range */
-        rf_agc[2] = param[9];           /* AGC 1 */
-        rf_agc[3] = param[10];          /* AGC 2 */
-        rf_agc[4] = param[2] & 0x0F;   /* IF fine tune */
-        rf_agc[5] = (param[1] == 0xFF) ? 0x80 : param[1];  /* IF freq */
-        rf_agc[6] = param[0] & 0x03;   /* Band config */
-        rf_agc[7] = 0x02;              /* Fixed */
+        /* TEMPORARY: hardcode bytes 0-7 from Sony's captured 701 MHz lock-success
+         * trace. Our g_param_table-based computation produces wrong bytes for
+         * almost every position. Real fix would be to reverse-engineer the full
+         * X_tune algorithm from the binary, but this validates whether a correct
+         * X_tune burst is what we needed. */
+        rf_agc[0] = 0x00;
+        rf_agc[1] = 0x88;
+        rf_agc[2] = 0x00;
+        rf_agc[3] = 0x0B;
+        rf_agc[4] = 0x22;
+        rf_agc[5] = 0x00;
+        rf_agc[6] = 0x18;
+        rf_agc[7] = 0x1D;
+        (void)param;
+        (void)is_cable;
 
-        /* Frequency in kHz (big-endian, 4 bytes) */
-        rf_agc[8]  = (uint8_t)((freq_khz >> 24) & 0xFF);
-        rf_agc[9]  = (uint8_t)((freq_khz >> 16) & 0xFF);
-        rf_agc[10] = (uint8_t)((freq_khz >> 8) & 0xFF);
-        rf_agc[11] = (uint8_t)(freq_khz & 0xFF);
+        /* Frequency in kHz: 24-bit LITTLE-endian at positions 8-10.
+         * Was 32-bit big-endian which is wrong. Verified via Frida-hooked
+         * trace at 701 MHz: Sony writes [0x48 0xB2 0x0A 0xFF] = LE encoding
+         * of 0x0AB248 = 701000, with 0xFF at position 11 (terminator). */
+        rf_agc[8]  = (uint8_t)(freq_khz & 0xFF);
+        rf_agc[9]  = (uint8_t)((freq_khz >> 8) & 0xFF);
+        rf_agc[10] = (uint8_t)((freq_khz >> 16) & 0xFF);
+        rf_agc[11] = 0xFF;
 
-        rf_agc[12] = 0x00;
-        rf_agc[13] = 0xFF;
-        rf_agc[14] = 0xFF;
-        rf_agc[15] = 0x03;
-        rf_agc[16] = 0x00;
+        /* Bytes 12-16: Sony's lock-success trace at 701 MHz mode-0 path:
+         *   {0x11, 0x99, 0x00, 0x24, 0x87}
+         * For ATSC 3.0 mode the values would differ (binary mode==3 path
+         * writes {0xD9, 0x0F, 0x24/0x25, 0x87} at positions 13-16).
+         * Using mode-0 values for now since that's what Sony's
+         * lock-success trace captured. */
+        rf_agc[12] = 0x11;
+        rf_agc[13] = 0x99;
+        rf_agc[14] = 0x00;
+        rf_agc[15] = 0x24;
+        rf_agc[16] = 0x87;
 
         ret = ascot3_write_regs(dev, ASCOT3_REG_RF_AGC_DATA, rf_agc, 17);
         if (ret != HDTVMATE_OK) return ret;
