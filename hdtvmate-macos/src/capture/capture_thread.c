@@ -39,6 +39,16 @@ static void *capture_thread_func(void *arg)
 
     LOG_INFO("Capture thread started (EP 0x%02x)", ctx->usb->endpoints.ep_rx_ts);
 
+    /* Clear any stale halt on the TS endpoint before the first bulk read.
+     * The IT9300 sometimes leaves EP 0x84 in a stalled state after
+     * configuration; without clear_halt the first read returns
+     * LIBUSB_ERROR_PIPE forever. */
+    {
+        extern int libusb_clear_halt(struct libusb_device_handle *, unsigned char);
+        libusb_clear_halt((struct libusb_device_handle *)ctx->usb->handle,
+                          ctx->usb->endpoints.ep_rx_ts | 0x80);
+    }
+
     while (ctx->should_run) {
         int transferred = 0;
         hdtvmate_error_t ret = usb_bulk_read(ctx->usb,
@@ -147,6 +157,12 @@ hdtvmate_error_t capture_start(capture_context_t *ctx, usb_device_t *usb,
     ctx->bridge = bridge;
     ctx->callback = callback;
     ctx->callback_data = user_data;
+
+    /* Configure IT9300 TS output before starting bulk reads. Without this
+     * the EP 0x84 endpoint stays stalled and bulk_read returns
+     * LIBUSB_ERROR_PIPE on every attempt. */
+    it9300_config_output(bridge);
+    it9300_enable_ts_port(bridge, 0);
 
     /* Initialize ring buffer */
     hdtvmate_error_t ret = circular_buffer_init(&ctx->ring_buffer, RING_BUFFER_SIZE);

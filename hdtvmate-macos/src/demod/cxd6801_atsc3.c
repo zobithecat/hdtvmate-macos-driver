@@ -566,17 +566,16 @@ hdtvmate_error_t cxd6801_atsc3_tune_end(cxd6801_device_t *dev)
      * after SoftReset rather than fighting an early stream-output write.
      */
     hdtvmate_error_t ret;
-    uint8_t a9_val = 0;
 
     /* SoftReset: bank 0x00 reg 0xFE = 0x01 */
     ret = cxd6801_soft_reset(dev);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Read bank 0x00 reg 0xA9 (Sony does this; preserve the flow) */
-    cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
-    (void)a9_val;
-
-    /* SetStreamOutput: bank 0x00 reg 0xC3 = 0x00 */
+    /* SetStreamOutput: bank 0x00 reg 0xC3 = 0x00.
+     * Sony's trace also does a read of reg 0xA9 between SoftReset and the
+     * c3 write, but adding that read appears to perturb hdtvmate_tune's
+     * subsequent wait_lock polling — long_lock_test (no read) locks fine,
+     * hdtvmate_tune (with read) NACKs through the whole 3s poll. Drop it. */
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
     return ret;
 }
@@ -837,11 +836,15 @@ hdtvmate_error_t cxd6801_atsc3_wait_lock(cxd6801_device_t *dev, uint32_t timeout
 
     if (!demod_locked) {
         LOG_WARN("Demod lock timeout at %u kHz", dev->frequency_khz);
-    } else {
-        LOG_WARN("ALP lock timeout at %u kHz (demod was locked)", dev->frequency_khz);
+        return HDTVMATE_ERR_NO_LOCK;
     }
-
-    return HDTVMATE_ERR_NO_LOCK;
+    /* Demod locked but ALP didn't — return success anyway. Sony's running
+     * app sees ALP_lock_all clear ~99.97% of the time even on working
+     * streams, so requiring it would prevent capture from ever starting.
+     * Demod lock is sufficient for the IT9300 to forward TS/ALP data on
+     * EP 0x84; downstream parsing can deal with ALP-level framing. */
+    LOG_INFO("Demod locked at %u kHz; ALP timer expired but capture is OK", dev->frequency_khz);
+    return HDTVMATE_OK;
 }
 
 hdtvmate_error_t cxd6801_atsc3_set_plp_config(cxd6801_device_t *dev,
