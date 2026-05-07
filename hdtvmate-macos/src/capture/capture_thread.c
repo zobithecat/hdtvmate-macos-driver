@@ -3,74 +3,140 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <libusb.h>
 
 /*
- * capture_thread.c - USB bulk capture and processing threads
+ * capture_thread.c - USB async bulk capture using libusb async transfers
  *
- * Based on SonyPHYAndroid.cpp threads:
- * - captureThread (line ~1811): reads USB bulk data from ENDPOINT_RX_TS
- * - processThread (line ~1830): parses TLV/ALP packets
- * - statusThread  (line ~1849): monitors signal quality
+ * Mirrors SonyPHYAndroid::readFromUsbDemodEndpointRxTs (@ 0x7bc84 in
+ * liba3_phy_sony.so) which uses async transfers — IT9300 firmware needs
+ * multiple URBs in flight before it starts pushing TS data, so the
+ * previous synchronous bulk_read approach got 0 bytes.
  *
- * Data flow:
- *   USB bulk IN -> circular_buffer -> processThread -> callback
+ * Pattern (matches Linux af9035.c / dvb-usb-v2):
+ *   1. Allocate N libusb_transfer structs + buffers
+ *   2. libusb_fill_bulk_transfer + libusb_submit_transfer for each
+ *   3. Event loop: libusb_handle_events_timeout
+ *   4. Callback fires when data arrives → write to ring + re-submit
  */
 
-/* USB read buffer size (128 KB per read) */
-#define USB_READ_BUF_SIZE  (128 * 1024)
+/* Per-URB transfer buffer size — matches Linux dvb-usb af9035 high-speed:
+ * 87 packets * 188 bytes/packet = 16356 bytes. */
+#define URB_BUF_SIZE  (87 * 188)
+
+/* Process thread buffer (drains ring into callback) */
+#define PROC_BUF_SIZE  (128 * 1024)
+
+/* Number of URBs in flight simultaneously. Linux uses 4-6. */
+#define NUM_URBS  6
 
 /* Circular buffer size (8 MB) */
 #define RING_BUFFER_SIZE   (8 * 1024 * 1024)
 
 extern void br_user_delay(uint32_t ms);
 
-/*
- * Capture thread - continuously reads USB bulk data
- */
+/* Per-URB context */
+typedef struct {
+    capture_context_t *ctx;
+    struct libusb_transfer *transfer;
+    uint8_t *buffer;
+} urb_ctx_t;
+
+static void LIBUSB_CALL transfer_cb(struct libusb_transfer *t)
+{
+    urb_ctx_t *uctx = (urb_ctx_t *)t->user_data;
+    capture_context_t *ctx = uctx->ctx;
+
+    if (t->status == LIBUSB_TRANSFER_COMPLETED && t->actual_length > 0) {
+        circular_buffer_write(&ctx->ring_buffer, t->buffer, t->actual_length);
+        ctx->bytes_received += t->actual_length;
+    } else if (t->status != LIBUSB_TRANSFER_COMPLETED &&
+               t->status != LIBUSB_TRANSFER_TIMED_OUT) {
+        ctx->errors++;
+        LOG_WARN("URB error status=%d actual=%d", t->status, t->actual_length);
+    } else if (t->status == LIBUSB_TRANSFER_TIMED_OUT) {
+        LOG_DBG("URB timeout (no data, length=%d)", t->actual_length);
+    } else if (t->status == LIBUSB_TRANSFER_COMPLETED) {
+        LOG_DBG("URB completed but length=0");
+    }
+
+    /* Re-submit if still running */
+    if (ctx->should_run) {
+        int r = libusb_submit_transfer(t);
+        if (r != 0) {
+            LOG_ERR("libusb_submit_transfer (resubmit) failed: %d", r);
+            ctx->errors++;
+        }
+    }
+}
+
 static void *capture_thread_func(void *arg)
 {
     capture_context_t *ctx = (capture_context_t *)arg;
-    uint8_t *read_buf = (uint8_t *)malloc(USB_READ_BUF_SIZE);
+    urb_ctx_t urbs[NUM_URBS];
+    struct libusb_device_handle *handle = (struct libusb_device_handle *)ctx->usb->handle;
+    uint8_t ep = ctx->usb->endpoints.ep_rx_ts | 0x80;
 
-    if (!read_buf) {
-        LOG_ERR("Failed to allocate USB read buffer");
-        return NULL;
-    }
+    LOG_INFO("Async capture thread started (EP 0x%02x, %d URBs x %d bytes)",
+             ep, NUM_URBS, URB_BUF_SIZE);
 
-    LOG_INFO("Capture thread started (EP 0x%02x)", ctx->usb->endpoints.ep_rx_ts);
+    /* Clear stale halt on EP 0x84 */
+    libusb_clear_halt(handle, ep);
+    /* libusb_reset_device tested — broke USB state, removed.
+     * Sony only calls reset_device in destructor (cleanup), not init. */
 
-    /* Clear any stale halt on the TS endpoint before the first bulk read.
-     * The IT9300 sometimes leaves EP 0x84 in a stalled state after
-     * configuration; without clear_halt the first read returns
-     * LIBUSB_ERROR_PIPE forever. */
-    {
-        extern int libusb_clear_halt(struct libusb_device_handle *, unsigned char);
-        libusb_clear_halt((struct libusb_device_handle *)ctx->usb->handle,
-                          ctx->usb->endpoints.ep_rx_ts | 0x80);
-    }
-
-    while (ctx->should_run) {
-        int transferred = 0;
-        hdtvmate_error_t ret = usb_bulk_read(ctx->usb,
-                                              ctx->usb->endpoints.ep_rx_ts,
-                                              read_buf, USB_READ_BUF_SIZE,
-                                              &transferred, 1000);
-
-        if (ret == HDTVMATE_OK && transferred > 0) {
-            circular_buffer_write(&ctx->ring_buffer, read_buf, transferred);
-            ctx->bytes_received += transferred;
-            LOG_TRC("USB read: %d bytes (total: %llu)",
-                    transferred, (unsigned long long)ctx->bytes_received);
-        } else if (ret != HDTVMATE_OK) {
-            ctx->errors++;
-            if (ctx->errors > 100) {
-                LOG_ERR("Too many USB errors, stopping capture");
-                break;
-            }
+    /* Allocate URBs and buffers */
+    int allocated = 0;
+    for (int i = 0; i < NUM_URBS; i++) {
+        urbs[i].ctx = ctx;
+        urbs[i].buffer = (uint8_t *)malloc(URB_BUF_SIZE);
+        urbs[i].transfer = libusb_alloc_transfer(0);
+        if (!urbs[i].buffer || !urbs[i].transfer) {
+            LOG_ERR("Failed to allocate URB %d", i);
+            goto cleanup;
         }
+        libusb_fill_bulk_transfer(urbs[i].transfer, handle, ep,
+                                   urbs[i].buffer, URB_BUF_SIZE,
+                                   transfer_cb, &urbs[i],
+                                   1000 /* timeout ms */);
+        allocated++;
     }
 
-    free(read_buf);
+    /* Submit all URBs up front — IT9300 firmware needs multiple ready
+     * before it starts streaming. */
+    int submitted = 0;
+    for (int i = 0; i < NUM_URBS; i++) {
+        int r = libusb_submit_transfer(urbs[i].transfer);
+        if (r != 0) {
+            LOG_ERR("libusb_submit_transfer[%d] failed: %d", i, r);
+            ctx->errors++;
+            break;
+        }
+        submitted++;
+    }
+    LOG_INFO("Submitted %d/%d URBs; entering event loop", submitted, NUM_URBS);
+
+    /* Event loop — drives async transfers. transfer_cb auto-resubmits. */
+    while (ctx->should_run) {
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 100000 };  /* 100ms */
+        libusb_handle_events_timeout(NULL, &tv);
+    }
+
+    /* Cancel all in-flight transfers */
+    for (int i = 0; i < submitted; i++) {
+        libusb_cancel_transfer(urbs[i].transfer);
+    }
+    /* Drain remaining events to let cancellations complete */
+    for (int i = 0; i < 5; i++) {
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 50000 };
+        libusb_handle_events_timeout(NULL, &tv);
+    }
+
+cleanup:
+    for (int i = 0; i < allocated; i++) {
+        if (urbs[i].transfer) libusb_free_transfer(urbs[i].transfer);
+        if (urbs[i].buffer) free(urbs[i].buffer);
+    }
     LOG_INFO("Capture thread stopped (received %llu bytes, %u errors)",
              (unsigned long long)ctx->bytes_received, ctx->errors);
     return NULL;
@@ -94,7 +160,7 @@ static void *capture_thread_func(void *arg)
 static void *process_thread_func(void *arg)
 {
     capture_context_t *ctx = (capture_context_t *)arg;
-    uint8_t *proc_buf = (uint8_t *)malloc(USB_READ_BUF_SIZE);
+    uint8_t *proc_buf = (uint8_t *)malloc(PROC_BUF_SIZE);
 
     if (!proc_buf) {
         LOG_ERR("Failed to allocate process buffer");
@@ -110,7 +176,7 @@ static void *process_thread_func(void *arg)
             continue;
         }
 
-        size_t to_read = (avail > USB_READ_BUF_SIZE) ? USB_READ_BUF_SIZE : avail;
+        size_t to_read = (avail > PROC_BUF_SIZE) ? PROC_BUF_SIZE : avail;
         size_t read_count = circular_buffer_read(&ctx->ring_buffer, proc_buf, to_read);
 
         if (read_count > 0 && ctx->callback) {

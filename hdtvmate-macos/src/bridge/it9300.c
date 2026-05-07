@@ -127,7 +127,16 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8DB, 0x00);
         /* Note: gpio14 (TS-E) and gpio15 (TS-A) are USED — leave alone */
 
-        it9300_set_bit(dev, 0xDA58, 0, 0);             /* ts_in_src = serial (Linux default) */
+        /* Sony's pre-enable extras (not in Linux it930x_init but Sony writes
+         * these between EP4 setup and TS port enable). Captured from
+         * /tmp/sony_init_complete.txt. */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA34, 0x01); /* TS packet length */
+        it9300_set_bit(dev, 0xDA58, 0, 0);                                /* ts_in_src = serial */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA51, 0xBC); /* TS pkt cfg */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5F, 0x7A); /* TS clk div 1 */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA60, 0x61); /* TS clk div 2 */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA61, 0x33); /* TS clk div 3 */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA62, 0x00); /* TS clk div 4 */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x01); /* ts0_aggre_mode */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA78, 0x47); /* ts0_sync_byte = 0x47 */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA4C, 0x01); /* ts0_en */
