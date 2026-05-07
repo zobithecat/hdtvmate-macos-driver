@@ -49,7 +49,17 @@
 #define IT9300_REG_CHIP_VERSION     0x1222
 #define IT9300_REG_FW_VERSION       0x0083
 #define IT9300_REG_LINK_VERSION     0x1222
-#define IT9300_REG_TS_OUTPUT_MODE   0xD827
+
+/* TS port enable register — confirmed via disassembly of
+ * IT9300_enableTsPort @ 0x18d880 in liba3_phy_sony.so:
+ *   w8 = 0xDA4C (base);  w8 += offset_from_struct[0x30]
+ *   IT9300_writeRegister(handle, port_idx, w8, 1) → enable
+ *   IT9300_writeRegister(handle, port_idx, w8, 0) → disable
+ *
+ * For port=0, channel=0 the offset is 0, so the actual reg is 0xDA4C.
+ * Our previous guess (0xD827) was wrong — that register doesn't gate
+ * EP 0x84 streaming and writing it produces no effect. */
+#define IT9300_REG_TS_OUTPUT_MODE   0xDA4C
 #define IT9300_REG_TS_PARALLEL      0xD828
 #define IT9300_REG_TS_SERIAL        0xD829
 #define IT9300_REG_PID_FILTER_CTRL  0xD860

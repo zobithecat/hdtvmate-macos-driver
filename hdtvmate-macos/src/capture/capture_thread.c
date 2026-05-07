@@ -158,10 +158,10 @@ hdtvmate_error_t capture_start(capture_context_t *ctx, usb_device_t *usb,
     ctx->callback = callback;
     ctx->callback_data = user_data;
 
-    /* Configure IT9300 TS output before starting bulk reads. Without this
-     * the EP 0x84 endpoint stays stalled and bulk_read returns
-     * LIBUSB_ERROR_PIPE on every attempt. */
-    it9300_config_output(bridge);
+    /* Enable TS port — pre-enable register sequence + DA4C=1.
+     * IT9300_initialize() already did setOutTsType + configOutput
+     * (Sony's order embeds those in init), so we only need
+     * enable_ts_port here. */
     it9300_enable_ts_port(bridge, 0);
 
     /* Initialize ring buffer */

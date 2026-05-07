@@ -359,10 +359,24 @@ hdtvmate_error_t br_cmd_query_info(it9300_device_t *dev, uint8_t *info, uint8_t 
  * Note: 3rd byte is SUB-ADDRESS (I2C register), NOT bus number!
  * This was confirmed by drvi2c_cxd_ite_Read/Write disassembly.
  */
+/* IT9300 reg 0xF424 wrap around I2C ops — Frida trace of Android HDTV
+ * Player v2.32 shows 2001 wraps in 30s of normal scan. Without these,
+ * EP 0x84 (TS bulk endpoint) stays stalled and bulk_read returns
+ * LIBUSB_ERROR_PIPE forever. The wrap is the EP4 state-machine commit. */
+static inline void br_f424_begin(it9300_device_t *dev) {
+    uint8_t v = 0;
+    br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0xF424, &v, 1);
+}
+static inline void br_f424_end(it9300_device_t *dev) {
+    uint8_t v = 1;
+    br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0xF424, &v, 1);
+}
+
 hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
                                    uint8_t i2c_addr, const uint8_t *data, uint8_t len)
 {
     uint8_t tx_data[IT9300_USB_MAX_WRITE];
+    hdtvmate_error_t ret;
 
     if (len + 3 > IT9300_USB_MAX_WRITE) {
         return HDTVMATE_ERR_INVALID_PARAM;
@@ -378,6 +392,12 @@ hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
             len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
             len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 
+    /* NOTE: Per-op 0xF424 wrap (Frida-observed pattern) caused
+     * intermittent CMD 0x2A read NACK 0x17 in lock-check polling;
+     * net effect was MORE errors not fewer. The Android driver may
+     * apply the wrap at a higher granularity (per "transaction" of
+     * grouped ops) which we can't easily replicate without a usbmon
+     * capture. Reverted to plain ops. */
     return br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx_data, len + 3, NULL, 0);
 }
 
@@ -395,6 +415,7 @@ hdtvmate_error_t br_cmd_i2c_read(it9300_device_t *dev, uint8_t sub_addr,
                                   uint8_t i2c_addr, uint8_t *data, uint8_t len)
 {
     uint8_t tx_data[3];
+    hdtvmate_error_t ret;
     tx_data[0] = len;        /* read length */
     tx_data[1] = i2c_addr;   /* I2C address (8-bit) */
     tx_data[2] = sub_addr;   /* I2C sub-address (register to read from) */
@@ -402,6 +423,7 @@ hdtvmate_error_t br_cmd_i2c_read(it9300_device_t *dev, uint8_t sub_addr,
     LOG_DBG("I2C_RD [addr=0x%02x sub=0x%02x len=%d]", i2c_addr, sub_addr, len);
 
     return br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, tx_data, 3, data, len);
+    (void)ret;
 }
 
 /*
