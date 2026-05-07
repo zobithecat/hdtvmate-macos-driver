@@ -581,16 +581,24 @@ hdtvmate_error_t cxd6801_atsc3_tune_end(cxd6801_device_t *dev)
     ret = cxd6801_soft_reset(dev);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SetStreamOutput: bank 0x00 reg 0xC3 = 0x00.
-     * Tested 0x01 (assumed = ENABLE based on Sony's SetStreamOutput(1)
-     * trace) — no change in EP 0x84 silence. Reverted. The actual
-     * register layout inside Sony's SetStreamOutput is unknown until
-     * we decode EP 0x02 USB CMD payloads (TODO: /tmp/sony_payload_trace.py).
-     *
-     * Sony's trace also does a read of reg 0xA9 between SoftReset and the
-     * c3 write, but adding that read appears to perturb hdtvmate_tune's
-     * subsequent wait_lock polling — long_lock_test (no read) locks fine,
-     * hdtvmate_tune (with read) NACKs through the whole 3s poll. Drop it. */
+    /* SetStreamOutput sequence — verified byte-by-byte from Sony's
+     * libusb_bulk_transfer payload trace (sony_payload.log):
+     *   1. bank 0x00 select        (i2c_write reg 0x00 = 0x00)
+     *   2. read reg 0xA9 (1 byte)  — value discarded; appears to be a
+     *      read-trigger or sync-poke that some chip state-machine bit
+     *      gates on. Sony always reads this between SoftReset and the
+     *      C3 write. We previously dropped it because it caused NACKs
+     *      in wait_lock polling, but those NACKs were due to the
+     *      0xF424 wrap direction being inverted (now fixed).
+     *   3. bank 0x00 select again  (Sony does this again — we omit
+     *      since cxd6801_i2c_write_one handles bank internally)
+     *   4. write reg 0xC3 = 0x00   (the actual SetStreamOutput action) */
+    {
+        uint8_t a9_val = 0;
+        (void)cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
+        LOG_DBG("Sony-pattern reg 0xA9 read: 0x%02x", a9_val);
+    }
+
     ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
     return ret;
 }

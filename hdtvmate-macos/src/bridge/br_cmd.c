@@ -398,14 +398,11 @@ hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
             len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
             len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 
-    /* 0xF424 wrap: ON before demod I2C cmd, OFF after.
-     * Direction was inverted previously (caused NACK 0x17). Now
-     * matches Sony's Frida-captured pattern (sony_full2.log: 1788
-     * 0xF424 toggles, all wrapping demod transactions). */
-    br_f424_begin(dev);
-    ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx_data, len + 3, NULL, 0);
-    br_f424_end(dev);
-    return ret;
+    /* No 0xF424 wrap on plain writes — verified from byte-level
+     * Frida capture (sony_payload.log). Sony only wraps the
+     * "set reg pointer" sub-command of a 2-stage read; normal
+     * writes (with data payload) go direct without wrap. */
+    return br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx_data, len + 3, NULL, 0);
 }
 
 /*
@@ -421,18 +418,52 @@ hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
 hdtvmate_error_t br_cmd_i2c_read(it9300_device_t *dev, uint8_t sub_addr,
                                   uint8_t i2c_addr, uint8_t *data, uint8_t len)
 {
-    uint8_t tx_data[3];
     hdtvmate_error_t ret;
-    tx_data[0] = len;        /* read length */
-    tx_data[1] = i2c_addr;   /* I2C address (8-bit) */
-    tx_data[2] = sub_addr;   /* I2C sub-address (register to read from) */
 
     LOG_DBG("I2C_RD [addr=0x%02x sub=0x%02x len=%d]", i2c_addr, sub_addr, len);
 
-    /* 0xF424 wrap: ON before demod I2C cmd, OFF after. */
+    /*
+     * Sony's 2-stage read pattern (verified byte-by-byte from
+     * sony_payload.log monitor_SyncStat polling cycle):
+     *
+     *   1. F424 = 1                        (repeater ON)
+     *   2. I2C_WR  count=1, slave, sub_addr  ← "set reg pointer", NO data
+     *   3. F424 = 0                        (repeater OFF)
+     *   4. I2C_RD  count=N, slave           ← bare read from current pointer
+     *
+     * Stage 1-3 wraps the pointer-set; stage 4 is unwrapped.
+     * Our previous 1-stage combined read (sub_addr + read in single
+     * I2C_RD packet) is NOT what Sony does, and the chip's I2C
+     * state machine appears to behave differently in the 2 cases.
+     */
+
+    /* Stage 1: F424 = 1 */
     br_f424_begin(dev);
-    ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, tx_data, 3, data, len);
+
+    /* Stage 2: set reg pointer (I2C_WR with no data — len=1 means
+     * "1-byte transaction including just the sub_addr") */
+    {
+        uint8_t set_ptr[3];
+        set_ptr[0] = 1;          /* 1-byte transaction */
+        set_ptr[1] = i2c_addr;   /* slave addr */
+        set_ptr[2] = sub_addr;   /* target register */
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, set_ptr, 3, NULL, 0);
+        if (ret != HDTVMATE_OK) {
+            br_f424_end(dev);
+            return ret;
+        }
+    }
+
+    /* Stage 3: F424 = 0 */
     br_f424_end(dev);
+
+    /* Stage 4: bare read (no sub_addr — chip uses the pointer set above) */
+    {
+        uint8_t rd_cmd[2];
+        rd_cmd[0] = len;
+        rd_cmd[1] = i2c_addr;
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, rd_cmd, 2, data, len);
+    }
     return ret;
 }
 
