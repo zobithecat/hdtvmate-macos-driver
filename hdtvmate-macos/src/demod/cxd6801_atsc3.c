@@ -582,6 +582,11 @@ hdtvmate_error_t cxd6801_atsc3_tune_end(cxd6801_device_t *dev)
     if (ret != HDTVMATE_OK) return ret;
 
     /* SetStreamOutput: bank 0x00 reg 0xC3 = 0x00.
+     * Tested 0x01 (assumed = ENABLE based on Sony's SetStreamOutput(1)
+     * trace) — no change in EP 0x84 silence. Reverted. The actual
+     * register layout inside Sony's SetStreamOutput is unknown until
+     * we decode EP 0x02 USB CMD payloads (TODO: /tmp/sony_payload_trace.py).
+     *
      * Sony's trace also does a read of reg 0xA9 between SoftReset and the
      * c3 write, but adding that read appears to perturb hdtvmate_tune's
      * subsequent wait_lock polling — long_lock_test (no read) locks fine,
