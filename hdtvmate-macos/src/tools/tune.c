@@ -59,6 +59,7 @@ int main(int argc, char *argv[])
     uint16_t udp_port = 1234;
     broadcast_standard_t std = BROADCAST_ATSC3;
     uint16_t vid = 0, pid = 0;
+    int plp_override = -1;  /* -1 = use default (plp[0]=0) */
 
     /* Parse arguments */
     for (int i = 1; i < argc; i++) {
@@ -79,6 +80,8 @@ int main(int argc, char *argv[])
             std = BROADCAST_ATSC1;
         } else if (strcmp(argv[i], "--atsc3") == 0) {
             std = BROADCAST_ATSC3;
+        } else if (strcmp(argv[i], "--plp") == 0 && i+1 < argc) {
+            plp_override = atoi(argv[++i]);
         } else if (strcmp(argv[i], "-v") == 0) {
             g_log_level = LOG_DEBUG;
         } else if (strcmp(argv[i], "-vv") == 0) {
@@ -118,6 +121,7 @@ int main(int argc, char *argv[])
         fprintf(stderr, "  --channel <num>        Channel number (14-51)\n");
         fprintf(stderr, "  --atsc1                Use ATSC 1.0 mode\n");
         fprintf(stderr, "  --atsc3                Use ATSC 3.0 mode (default)\n");
+        fprintf(stderr, "  --plp <id>             Override PLP id (default 0; try 1,2,3 if EP0x84 silent)\n");
         fprintf(stderr, "  -v                     Verbose logging\n");
         fprintf(stderr, "  -q                     Quiet (errors only)\n");
         return 1;
@@ -155,6 +159,14 @@ int main(int argc, char *argv[])
     ret = cxd6801_initialize(&demod);
     if (ret != HDTVMATE_OK) goto cleanup;
 
+    /* PLP override: pre-populate plp_config so cxd6801_atsc3_tune picks it up
+     * instead of default plp[0]=0. */
+    if (plp_override >= 0 && plp_override <= 255) {
+        demod.plp_config.num_plps = 1;
+        demod.plp_config.plp_ids[0] = (uint8_t)plp_override;
+        fprintf(stderr, "PLP override: tuning will use PLP id=%d\n", plp_override);
+    }
+
     /* Tune to channel */
     fprintf(stderr, "Tuning to %u kHz...\n", frequency_khz);
     ret = cxd6801_acquire_channel(&demod, frequency_khz, std);
@@ -168,6 +180,21 @@ int main(int argc, char *argv[])
     cxd6801_get_stats(&demod, &stats);
     fprintf(stderr, "Locked! SNR=%d.%02d dB, RF=%d dBm\n",
             stats.snr_db_x100 / 100, stats.snr_db_x100 % 100, stats.rf_level_dbm);
+
+    /* Query available PLPs from the demod (post-lock).
+     * If EP 0x84 is silent on default plp 0, retry with --plp <id>
+     * for each id printed below. */
+    if (std == BROADCAST_ATSC3) {
+        uint8_t plp_ids[64] = {0};
+        uint8_t plp_count = 0;
+        if (cxd6801_monitor_plp_list(&demod, plp_ids, &plp_count) == HDTVMATE_OK) {
+            fprintf(stderr, "Available PLPs: %d", plp_count);
+            for (int i = 0; i < plp_count && i < 16; i++) {
+                fprintf(stderr, "%s%d", i == 0 ? " [" : ",", plp_ids[i]);
+            }
+            fprintf(stderr, "%s\n", plp_count > 0 ? "]" : "");
+        }
+    }
 
     /* Setup output */
     capture_callback_t cb = stdout_callback;

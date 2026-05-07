@@ -493,10 +493,20 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         LOG_WARN("AutoDetectSeq_Init failed (continuing)");
     }
 
-    /* SetPLPConfig with single PLP id=0 (default for most ATSC 3.0 channels) */
+    /* SetPLPConfig — honor caller-supplied dev->plp_config if populated
+     * (set num_plps > 0 + plp_ids[] before calling tune to override).
+     * Otherwise default to single PLP id=0. Korean broadcasts sometimes
+     * carry the content stream on PLP 1 or 2 (PLP 0 = signaling). */
     {
-        uint8_t plp[1] = { 0 };
-        ret = cxd6801_atsc3_set_plp_config_internal(dev, 1, plp);
+        uint8_t plp_buf[4] = { 0 };
+        uint8_t plp_n = 1;
+        if (dev->plp_config.num_plps > 0 && dev->plp_config.num_plps <= 4) {
+            plp_n = dev->plp_config.num_plps;
+            memcpy(plp_buf, dev->plp_config.plp_ids, plp_n);
+            LOG_INFO("Tune: using caller-supplied PLP config (n=%d, plp[0]=%d)",
+                     plp_n, plp_buf[0]);
+        }
+        ret = cxd6801_atsc3_set_plp_config_internal(dev, plp_n, plp_buf);
         if (ret != HDTVMATE_OK) {
             LOG_WARN("SetPLPConfig failed (continuing)");
         }
