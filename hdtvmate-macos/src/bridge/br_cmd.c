@@ -362,13 +362,19 @@ hdtvmate_error_t br_cmd_query_info(it9300_device_t *dev, uint8_t *info, uint8_t 
 /* IT9300 reg 0xF424 wrap around I2C ops — Frida trace of Android HDTV
  * Player v2.32 shows 2001 wraps in 30s of normal scan. Without these,
  * EP 0x84 (TS bulk endpoint) stays stalled and bulk_read returns
- * LIBUSB_ERROR_PIPE forever. The wrap is the EP4 state-machine commit. */
+ * LIBUSB_ERROR_PIPE forever. The wrap is the EP4 state-machine commit.
+ *
+ * Direction (verified 2026-05-07 from Frida sony_full2.log capture):
+ *   begin: 0xF424 = 1   (repeater ON  — demod I2C cmd can pass)
+ *   end:   0xF424 = 0   (repeater OFF — close transaction)
+ * Earlier version had these inverted (0 on begin, 1 on end), which
+ * meant demod cmds happened with repeater OFF → NACK 0x17. */
 static inline void br_f424_begin(it9300_device_t *dev) {
-    uint8_t v = 0;
+    uint8_t v = 1;
     br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0xF424, &v, 1);
 }
 static inline void br_f424_end(it9300_device_t *dev) {
-    uint8_t v = 1;
+    uint8_t v = 0;
     br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0xF424, &v, 1);
 }
 
@@ -392,13 +398,14 @@ hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
             len > 0 ? data[0] : 0, len > 1 ? data[1] : 0,
             len > 2 ? data[2] : 0, len > 3 ? data[3] : 0);
 
-    /* NOTE: Per-op 0xF424 wrap (Frida-observed pattern) caused
-     * intermittent CMD 0x2A read NACK 0x17 in lock-check polling;
-     * net effect was MORE errors not fewer. The Android driver may
-     * apply the wrap at a higher granularity (per "transaction" of
-     * grouped ops) which we can't easily replicate without a usbmon
-     * capture. Reverted to plain ops. */
-    return br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx_data, len + 3, NULL, 0);
+    /* 0xF424 wrap: ON before demod I2C cmd, OFF after.
+     * Direction was inverted previously (caused NACK 0x17). Now
+     * matches Sony's Frida-captured pattern (sony_full2.log: 1788
+     * 0xF424 toggles, all wrapping demod transactions). */
+    br_f424_begin(dev);
+    ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx_data, len + 3, NULL, 0);
+    br_f424_end(dev);
+    return ret;
 }
 
 /*
@@ -422,8 +429,11 @@ hdtvmate_error_t br_cmd_i2c_read(it9300_device_t *dev, uint8_t sub_addr,
 
     LOG_DBG("I2C_RD [addr=0x%02x sub=0x%02x len=%d]", i2c_addr, sub_addr, len);
 
-    return br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, tx_data, 3, data, len);
-    (void)ret;
+    /* 0xF424 wrap: ON before demod I2C cmd, OFF after. */
+    br_f424_begin(dev);
+    ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, tx_data, 3, data, len);
+    br_f424_end(dev);
+    return ret;
 }
 
 /*
