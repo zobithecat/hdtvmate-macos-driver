@@ -20,15 +20,19 @@
  *   4. Callback fires when data arrives → write to ring + re-submit
  */
 
-/* Per-URB transfer buffer size — matches Linux dvb-usb af9035 high-speed:
- * 87 packets * 188 bytes/packet = 16356 bytes. */
-#define URB_BUF_SIZE  (87 * 188)
+/* Per-URB transfer buffer size — Frida-captured Sony Android app value.
+ * Sony submits libusb_submit_transfer with len=32768 (32 KB = 0x8000)
+ * on EP 0x84. Linux af9035 uses 87*188=16356 (~16 KB) but for ITE/Sony
+ * combo the firmware seems to expect the larger 32 KB buffers — our
+ * earlier 16 KB attempts got 0 bytes / all timeouts. */
+#define URB_BUF_SIZE  (32 * 1024)
 
 /* Process thread buffer (drains ring into callback) */
 #define PROC_BUF_SIZE  (128 * 1024)
 
-/* Number of URBs in flight simultaneously. Linux uses 4-6. */
-#define NUM_URBS  6
+/* Number of URBs in flight — Sony submits 8 simultaneously per Frida
+ * trace. Total in-flight buffers: 8 * 32 KB = 256 KB. */
+#define NUM_URBS  8
 
 /* Circular buffer size (8 MB) */
 #define RING_BUFFER_SIZE   (8 * 1024 * 1024)
