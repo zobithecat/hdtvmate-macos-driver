@@ -181,20 +181,12 @@ int main(int argc, char *argv[])
     fprintf(stderr, "Locked! SNR=%d.%02d dB, RF=%d dBm\n",
             stats.snr_db_x100 / 100, stats.snr_db_x100 % 100, stats.rf_level_dbm);
 
-    /* Query available PLPs from the demod (post-lock).
-     * If EP 0x84 is silent on default plp 0, retry with --plp <id>
-     * for each id printed below. */
-    if (std == BROADCAST_ATSC3) {
-        uint8_t plp_ids[64] = {0};
-        uint8_t plp_count = 0;
-        if (cxd6801_monitor_plp_list(&demod, plp_ids, &plp_count) == HDTVMATE_OK) {
-            fprintf(stderr, "Available PLPs: %d", plp_count);
-            for (int i = 0; i < plp_count && i < 16; i++) {
-                fprintf(stderr, "%s%d", i == 0 ? " [" : ",", plp_ids[i]);
-            }
-            fprintf(stderr, "%s\n", plp_count > 0 ? "]" : "");
-        }
-    }
+    /* monitor_PLPList intentionally NOT called — Frida trace of the
+     * Sony Android app shows it never invokes monitor_PLPList. Reading
+     * bank 0x92 reg 0x40 returns uninitialized chip memory (we observed
+     * count=64 with random first-byte values across runs). Sony polls
+     * monitor_SelectedPLPValid + sync_stat (CheckALPLock pattern)
+     * instead — see streaming_blocked.md memory note. */
 
     /* Setup output */
     capture_callback_t cb = stdout_callback;

@@ -295,11 +295,30 @@ hdtvmate_error_t cxd6801_acquire_channel(cxd6801_device_t *dev,
     }
 
     switch (std) {
-    case BROADCAST_ATSC3:
-        ret = cxd6801_atsc3_tune(dev, frequency_khz, CXD6801_BW_6MHZ);
-        if (ret != HDTVMATE_OK) return ret;
-        ret = cxd6801_atsc3_wait_lock(dev, 3000);
+    case BROADCAST_ATSC3: {
+        /* Sony parity: retry up to 6 times. Frida trace shows the
+         * official app calls integ_atsc3_Tune up to 6 times before
+         * giving up — single-shot tune often returns ret=5 (ALP lock
+         * timeout) even when chip will eventually lock on a retry. */
+        const int MAX_RETRIES = 6;
+        for (int attempt = 0; attempt < MAX_RETRIES; attempt++) {
+            if (attempt > 0) {
+                LOG_INFO("ATSC 3.0 retune attempt %d/%d", attempt + 1, MAX_RETRIES);
+                /* Drop back to SLEEP between attempts so X_tune state
+                 * stays clean — same as Sony's UnlockCase + Tune cycle. */
+                cxd6801_sleep(dev);
+            }
+            ret = cxd6801_atsc3_tune(dev, frequency_khz, CXD6801_BW_6MHZ);
+            if (ret != HDTVMATE_OK) continue;
+            ret = cxd6801_atsc3_wait_lock(dev, 3000);
+            if (ret == HDTVMATE_OK) {
+                if (attempt > 0)
+                    LOG_INFO("ATSC 3.0 locked on attempt %d/%d", attempt + 1, MAX_RETRIES);
+                break;
+            }
+        }
         break;
+    }
     case BROADCAST_ATSC1:
         ret = cxd6801_atsc1_tune(dev, frequency_khz);
         if (ret != HDTVMATE_OK) return ret;
