@@ -86,5 +86,17 @@ target_link_libraries(no_reset_probe hdtvmate_core)
 add_executable(scan_14_30 src/tools/scan_14_30.c)
 target_link_libraries(scan_14_30 hdtvmate_core)
 
+# --- Full ATSC scan (channels 2-51, both modes) ---
+add_executable(scan_full src/tools/scan_full.c)
+target_link_libraries(scan_full hdtvmate_core)
+
+# --- Extended lock status polling (verifies sync_stat, ALP, SNR over time) ---
+add_executable(test_lock_extended src/tools/test_lock_extended.c)
+target_link_libraries(test_lock_extended hdtvmate_core)
+
+# --- 30-second sync_stat distribution histogram ---
+add_executable(long_lock_test src/tools/long_lock_test.c)
+target_link_libraries(long_lock_test hdtvmate_core)
+
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)

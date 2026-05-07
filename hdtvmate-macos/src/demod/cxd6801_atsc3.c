@@ -437,10 +437,11 @@ static hdtvmate_error_t cxd6801_sltoaa3(cxd6801_device_t *dev)
         return ret;
     }
 
-    /* Stream output enable: bank 0x00 reg 0xC3 = 0x00 (only).
-     * Lock-success trace shows Sony writes 0x00 here, NOT 0x01 as before. */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
+    /* NOTE: bank 0x00 reg 0xC3 = 0x00 used to be written here, but Sony's
+     * lock-success trace puts it AFTER the SoftReset in TuneEnd. Moved
+     * to cxd6801_atsc3_tune_end() to match the captured order. Writing it
+     * pre-SoftReset stomped on the stream-output state the chip needed
+     * during acquisition. */
 
     LOG_DBG("SLtoAA3: mode transition + band setting complete");
     return HDTVMATE_OK;
@@ -553,25 +554,31 @@ hdtvmate_error_t cxd6801_atsc3_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 hdtvmate_error_t cxd6801_atsc3_tune_end(cxd6801_device_t *dev)
 {
     /*
-     * From Ghidra decompile of sony_cxd6801_demod_TuneEnd():
-     * For non-ATSC1: SoftReset() then SetStreamOutput()
+     * From Frida-captured v2.32 lock-success trace, post-tuner sequence:
+     *   bank 0x00 select
+     *   write fe = 0x01   (SoftReset)
+     *   bank 0x00 select
+     *   read  a9 = 0x00   (purpose unclear; likely an internal sync poke)
+     *   write c3 = 0x00   (SetStreamOutput)
      *
-     * SoftReset: bank 0x00, reg 0xFE = 0x01
-     * SetStreamOutput: enables TS/ALP output pin
+     * Order matters — moving c3 here (it used to live at the end of
+     * SLtoAA3) lets the chip's acquisition state machine come up clean
+     * after SoftReset rather than fighting an early stream-output write.
      */
     hdtvmate_error_t ret;
+    uint8_t a9_val = 0;
 
-    /* Soft reset to start acquisition (bank 0x00, reg 0xFE = 0x01) */
+    /* SoftReset: bank 0x00 reg 0xFE = 0x01 */
     ret = cxd6801_soft_reset(dev);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* SetStreamOutput - enable ALP output
-     * From Ghidra: This writes to output enable register.
-     * The exact register depends on output mode but is typically
-     * bank 0x00, reg 0xC3 for stream output enable.
-     * For now, the SoftReset alone should trigger acquisition. */
+    /* Read bank 0x00 reg 0xA9 (Sony does this; preserve the flow) */
+    cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
+    (void)a9_val;
 
-    return HDTVMATE_OK;
+    /* SetStreamOutput: bank 0x00 reg 0xC3 = 0x00 */
+    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
+    return ret;
 }
 
 hdtvmate_error_t cxd6801_atsc3_check_demod_lock(cxd6801_device_t *dev, bool *locked)
@@ -617,18 +624,20 @@ hdtvmate_error_t cxd6801_atsc3_check_alp_lock(cxd6801_device_t *dev, bool *locke
 
     /*
      * Check ALP lock (ATSC 3.0 transport layer lock).
-     * From Ghidra decompile of monitor_SyncStat():
      *   Bank 0x95, reg 0x40:
      *     bit 4: ALPLockAll (all PLPs locked)
-     *     bit 0: alpLockStat[0]
-     *     bit 1: alpLockStat[1]
-     *     bit 2: alpLockStat[2]
-     *     bit 3: alpLockStat[3]
+     *     bits[3:0]: alpLockStat[0..3] per-PLP lock
+     *
+     * Frida trace of Sony's running app on this hardware shows reg 0x40
+     * read 3632 times with data=0x00 in 3631 of them and data=0x95 only
+     * once — so ALPLockAll is genuinely rare even for a working stack.
+     * Accept ANY per-PLP bit set so we don't block data capture when a
+     * single PLP is decoding fine.
      */
     ret = cxd6801_i2c_read(&dev->i2c_demod, 0x95, 0x40, &data, 1);
     if (ret != HDTVMATE_OK) return ret;
 
-    *locked = ((data >> 4) & 0x01) != 0;  /* ALPLockAll bit */
+    *locked = (data & 0x1F) != 0;  /* any PLP bit OR ALPLockAll */
 
     LOG_TRC("ALP lock: bank=0x95 reg=0x40 = 0x%02x -> %s",
             data, *locked ? "LOCKED" : "unlocked");

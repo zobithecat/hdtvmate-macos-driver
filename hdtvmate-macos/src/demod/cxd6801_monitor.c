@@ -32,24 +32,42 @@ hdtvmate_error_t cxd6801_monitor_sync_stat(cxd6801_device_t *dev, uint8_t *sync_
 
 hdtvmate_error_t cxd6801_monitor_snr(cxd6801_device_t *dev, int32_t *snr_x100)
 {
-    uint8_t data[2] = {0};
+    uint8_t data[3] = {0};
+    uint8_t flag = 0;
     hdtvmate_error_t ret;
 
     /*
      * Read instantaneous SNR.
-     * From sony_cxd6801_demod_atsc3_monitor_SNR():
-     * Register returns raw value, conversion: SNR(dB) = value / 8.0
      *
-     * TODO: Confirm register and conversion from Ghidra
+     * From disassembly of sony_cxd6801_demod_atsc3_monitor_SNR @ 0xf2954:
+     *   SetBank(0x90)
+     *   ReadRegister(reg=0x28, len=3)   → SNR raw 24-bit (byte order: see below)
+     *   ReadRegister(reg=0x58, len=1)   → branch selector flag
+     *
+     * Raw assembly:
+     *   ldurb w9, [x29, #-0xc]          ; byte 0  (reg 0x28+0)
+     *   ldurb w8, [x29, #-0xb]          ; byte 1  (reg 0x28+1)
+     *   lsl   w8, w8, #8                ; b1 << 8
+     *   bfi   w8, w9, #16, #8           ; w8 |= (b0 << 16)
+     *   ldurb w9, [x29, #-0xa]          ; byte 2  (reg 0x28+2)
+     *   orr   w8, w8, w9                ; w8 |= b2
+     * → raw_24 = (byte0 << 16) | (byte1 << 8) | byte2
+     *
+     * The flag at reg 0x58 selects which constants are used in the
+     * subsequent SNR math (linear→dB conversion). For now we report the
+     * raw 24-bit value scaled by 100/8 — same scaling as before but on
+     * the correct register. Full conversion to dB×100 requires the
+     * lookup-table math from f2b94..f2c60.
      */
-    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x91, 0x28, data, 2);
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x90, 0x28, data, 3);
     if (ret != HDTVMATE_OK) return ret;
+    cxd6801_i2c_read(&dev->i2c_demod, 0x90, 0x58, &flag, 1);
 
-    uint16_t raw = ((uint16_t)data[0] << 8) | data[1];
-    /* SNR in dB * 100 = (raw / 8.0) * 100 = raw * 12.5 */
-    *snr_x100 = (int32_t)(raw * 100 / 8);
+    uint32_t raw_24 = ((uint32_t)data[0] << 16) | ((uint32_t)data[1] << 8) | data[2];
+    *snr_x100 = (int32_t)(raw_24 * 100 / 8);
 
-    LOG_DBG("SNR: raw=0x%04x -> %d.%02d dB", raw, *snr_x100 / 100, *snr_x100 % 100);
+    LOG_DBG("SNR: raw_24=0x%06x flag=0x%02x -> %d.%02d dB",
+            raw_24, flag, *snr_x100 / 100, *snr_x100 % 100);
     return HDTVMATE_OK;
 }
 

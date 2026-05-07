@@ -254,47 +254,50 @@ static hdtvmate_error_t ascot3_set_reg_bits(cxd6801_device_t *dev,
 }
 
 /* ============================================================
- * X_oscen - VCO oscillator enable (decompiled from 0xdf344)
+ * X_oscen - VCO oscillator enable (Sony's actual TUNE-phase sequence)
  *
- * Enables the VCO and selects xtal clock divider.
- * Called BEFORE X_tune in the ascot3_Tune sequence.
+ * Frida trace of liba3_phy_sony.so v2.32 lock-success run shows ZERO
+ * writes to tuner reg 0x82 or 0x84 across 49,703 captured ops. The
+ * decompiled `0xdf344` we matched earlier appears to be either dead
+ * code or a different code path the running app doesn't take.
  *
- * reg 0x82: {vcoCal ? 0xC7 : 0xC5, 0x00}
- * reg 0x84: {xtal_code, 0x00}  (xtal_code depends on freq range)
- * reg 0x87: {0xC4, 0x40}
+ * Sony's per-tune sequence starts with:
+ *   read+write reg 0x74 = 0x02
+ *   write reg 0x87 = {0xC4, 0x40}
+ *   ... LNA / RF filter / 0x5E / PLL ctrl / 0x68 ...
+ *
+ * So this function reduces to: read 0x74, write 0x74=0x02, write
+ * 0x87={0xC4,0x40}. The xtal divider that used to go to reg 0x84 is
+ * actually byte 4 of the reg 0x5E burst — set in ascot3_x_tune.
  * ============================================================ */
 static hdtvmate_error_t ascot3_x_oscen(cxd6801_device_t *dev,
                                         uint32_t freq_khz, bool vco_cal)
 {
     hdtvmate_error_t ret;
     uint8_t data[2];
-    int range = ascot3_freq_range(freq_khz);
+    (void)freq_khz;
+    (void)vco_cal;
 
-    LOG_DBG("X_oscen: freq=%u kHz, vcoCal=%d, range=%d", freq_khz, vco_cal, range);
-
-    /* reg 0x82: VCO calibration control */
-    data[0] = vco_cal ? 0xC7 : 0xC5;
-    data[1] = 0x00;
-    ret = ascot3_write_regs(dev, 0x82, data, 2);
-    if (ret != HDTVMATE_OK) return ret;
-
-    /* reg 0x84: xtal clock selection
-     * The value selects the reference clock divider for the PLL.
-     * UHF (>= 464001): smaller divider → higher ref clock
-     * VHF (< 464001): larger divider → lower ref clock
-     */
-    if (range == 2) {
-        /* UHF */
-        data[0] = ascot3_divider_uhf[ASCOT3_XTAL_TYPE];
-    } else {
-        /* VHF-Lo or VHF-Hi */
-        data[0] = ascot3_divider_vhf[ASCOT3_XTAL_TYPE];
+    /* reg 0x74 read + write 0x02 (Sony's first tuner write per tune) */
+    {
+        uint8_t cur = 0;
+        uint8_t tx[8];
+        extern hdtvmate_error_t br_cmd_send(it9300_device_t *dev, uint16_t cmd,
+                                             const uint8_t *tx_data, uint8_t tx_len,
+                                             uint8_t *rx_data, uint8_t rx_len);
+        tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER; tx[3]=0x74;
+        br_cmd_send(dev->bridge, 0x002B, tx, 4, NULL, 0);
+        tx[0]=1; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_TUNER;
+        br_cmd_send(dev->bridge, 0x002A, tx, 3, &cur, 1);
+        (void)cur;
     }
-    data[1] = 0x00;
-    ret = ascot3_write_regs(dev, 0x84, data, 2);
+    data[0] = 0x02;
+    ret = ascot3_write_regs(dev, 0x74, data, 1);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* reg 0x87: oscillator config (always {0xC4, 0x40}) */
+    /* reg 0x87: oscillator config — Sony writes {0xC4, 0x40} on first tune
+     * (vcoCal=true) and {0xC4, 0x41} on retunes. Our scan_full power-cycles
+     * and re-inits every channel, so vcoCal is always true here. */
     data[0] = ASCOT3_OSC_CONFIG_0;  /* 0xC4 */
     data[1] = ASCOT3_OSC_CONFIG_1;  /* 0x40 */
     ret = ascot3_write_regs(dev, 0x87, data, 2);
@@ -352,42 +355,64 @@ static hdtvmate_error_t ascot3_x_tune(cxd6801_device_t *dev,
     ret = ascot3_write_regs(dev, ASCOT3_REG_RF_FILTER_MODE, data, 2);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* ---- Step 4: reg 0x5E (9 bytes) - Core tuning data ---- */
+    /* ---- Step 4: reg 0x5E (9 bytes) - Core tuning data ----
+     *
+     * Hardcoded to Sony's exact captured bytes for ATSC 3.0 / 6 MHz / UHF
+     * 701 MHz: {EE 02 1E 67 03 B4 78 08 30}.
+     *
+     * Our previous derivation from g_param_table[ATSC3] produced
+     * {EE 02 1E 67 08 0C 03 80 08} — wildly different from Sony's actual
+     * writes. The g_param_table values appear to encode something
+     * different from what bytes 5-8 of reg 0x5E need. Until that gets
+     * reverse-engineered, hardcoding these UHF/ATSC3 values lets us at
+     * least exercise the lock path correctly for 701 MHz.
+     *
+     * For non-UHF ranges we'd need a different captured set; leaving the
+     * old computation as a fallback so VHF tunes at least don't NACK.
+     */
     {
         uint8_t tune_data[9];
 
-        tune_data[0] = 0xEE;  /* fixed */
-        tune_data[1] = 0x02;  /* fixed */
-        tune_data[2] = 0x1E;  /* fixed */
-        tune_data[3] = vco_cal ? 0x67 : 0x45;  /* VCO cal flag */
-
-        /* Xtal-dependent divider (sets PLL reference ratio) */
-        if (range == 2) {
-            /* UHF */
-            tune_data[4] = ascot3_divider_uhf[ASCOT3_XTAL_TYPE];
+        if (range == 2 && tv_system == TV_SYSTEM_ATSC3) {
+            /* Sony's exact 701 MHz UHF / ATSC 3.0 / 6 MHz capture */
+            tune_data[0] = 0xEE;
+            tune_data[1] = 0x02;
+            tune_data[2] = 0x1E;
+            tune_data[3] = 0x67;
+            tune_data[4] = 0x03;
+            tune_data[5] = 0xB4;
+            tune_data[6] = 0x78;
+            tune_data[7] = 0x08;
+            tune_data[8] = 0x30;
         } else {
-            /* VHF */
-            tune_data[4] = ascot3_divider_vhf[ASCOT3_XTAL_TYPE];
+            tune_data[0] = 0xEE;
+            tune_data[1] = 0x02;
+            tune_data[2] = 0x1E;
+            tune_data[3] = vco_cal ? 0x67 : 0x45;
+            if (range == 2) {
+                tune_data[4] = ascot3_divider_uhf[ASCOT3_XTAL_TYPE];
+            } else {
+                tune_data[4] = ascot3_divider_vhf[ASCOT3_XTAL_TYPE];
+            }
+            tune_data[5] = param[3 + range];
+            tune_data[6] = param[6 + range];
+            tune_data[7] = (param[1] == 0xFF) ? 0x80 : param[1];
+            tune_data[8] = param[2] & 0x0F;
         }
-
-        /* Gain value from table (offset 3+range) */
-        tune_data[5] = param[3 + range];
-
-        /* RF filter from table (offset 6+range) */
-        tune_data[6] = param[6 + range];
-
-        /* IF frequency setting */
-        tune_data[7] = (param[1] == 0xFF) ? 0x80 : param[1];
-
-        /* IF fine tune */
-        tune_data[8] = param[2] & 0x0F;
 
         ret = ascot3_write_regs(dev, ASCOT3_REG_TUNE_DATA, tune_data, 9);
         if (ret != HDTVMATE_OK) return ret;
     }
 
-    /* ---- Step 5: SetRegisterBits(0x67, 0x06, 0x06) - PLL control ---- */
-    ret = ascot3_set_reg_bits(dev, ASCOT3_REG_PLL_CTRL, 0x06, 0x06);
+    /* ---- Step 5: reg 0x67 read + write back (Sony's actual behavior) ----
+     *
+     * Frida trace shows Sony does read 0x67 then write the SAME byte back
+     * (typically 0x00). The decompiled `set_reg_bits(0x67, 0x06, 0x06)`
+     * appears to be a different code path; the running app does NOT set
+     * bits 1/2 here. Setting 0x06 actively breaks lock — verified against
+     * v2.32 lock-success capture which shows 0x67 stays at 0x00.
+     */
+    ret = ascot3_set_reg_bits(dev, ASCOT3_REG_PLL_CTRL, 0x00, 0x00);
     if (ret != HDTVMATE_OK) return ret;
 
     /* ---- Step 6: reg 0x68 (17 bytes) - RF filter + AGC + gain ---- */
@@ -455,6 +480,24 @@ static hdtvmate_error_t ascot3_x_tune(cxd6801_device_t *dev,
         if (ret != HDTVMATE_OK) return ret;
     }
 
+    /* ---- Step 7: Wait for PLL lock (Sony waits ~50ms here) ----
+     * The X_tune burst kicks off the tuner's internal calibration; we
+     * must let it complete before the post-tune writes that finalize
+     * the tune state. */
+    br_user_delay(50);
+
+    /* ---- Step 8: Post-tune writes (Sony's exact captured sequence) ----
+     * After the 50ms wait Sony writes reg 0x88=0 and reg 0x87=0xC0
+     * (single byte, NOT the {C4,40} 2-byte pair from earlier). Without
+     * these the chip may stay in "tuning" mode and never raise lock. */
+    {
+        uint8_t one;
+        one = 0x00; ret = ascot3_write_regs(dev, 0x88, &one, 1);
+        if (ret != HDTVMATE_OK) return ret;
+        one = 0xC0; ret = ascot3_write_regs(dev, 0x87, &one, 1);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
     return HDTVMATE_OK;
 }
 
@@ -486,20 +529,78 @@ hdtvmate_error_t cxd6801_tuner_init(cxd6801_device_t *dev)
         LOG_WARN("Tuner ID: 0x%02x (repeater may not be working)", tuner_id);
     }
 
-    /* ASCOT3 power-on initialization:
-     * From sony_cxd6801_ascot3_Initialize decompile:
-     * 1. Write power-on defaults to multiple registers
-     * 2. Wait stabilization
-     *
-     * Minimal init: just verify communication works.
-     * Full init happens implicitly during first tune.
-     */
+    /* ASCOT3 X_pon (power-on init) — Sony's captured sequence from running
+     * v2.32 HDTV Player. Without this the chip's RF/LNA/AGC are uninitialized
+     * and lock acquisition fails even with a perfect X_tune burst later. */
+    {
+        uint8_t buf[32];
 
+        /* reg 0x99: LNA config (2 bytes) */
+        buf[0] = 0x7A; buf[1] = 0x01;
+        ret = ascot3_write_regs(dev, 0x99, buf, 2);
+        if (ret != HDTVMATE_OK) goto fail;
+
+        /* reg 0x81: BIG init burst (20 bytes) — main X_pon configuration */
+        {
+            uint8_t init81[20] = {
+                0x18, 0x84, 0xA8, 0x82, 0x00, 0x00, 0xC4, 0x40,
+                0x10, 0x00, 0x45, 0x75, 0x07, 0x1C, 0x3F, 0x02,
+                0x10, 0x20, 0x0A, 0x00
+            };
+            ret = ascot3_write_regs(dev, 0x81, init81, 20);
+            if (ret != HDTVMATE_OK) goto fail;
+        }
+
+        /* reg 0x9B = 0 */
+        buf[0] = 0x00;
+        ret = ascot3_write_regs(dev, 0x9B, buf, 1);
+        if (ret != HDTVMATE_OK) goto fail;
+
+        /* reg 0x17 = {0x2A, 0x0E} */
+        buf[0] = 0x2A; buf[1] = 0x0E;
+        ret = ascot3_write_regs(dev, 0x17, buf, 2);
+        if (ret != HDTVMATE_OK) goto fail;
+
+        /* reg 0x95 = 0x01 */
+        buf[0] = 0x01;
+        ret = ascot3_write_regs(dev, 0x95, buf, 1);
+        if (ret != HDTVMATE_OK) goto fail;
+
+        /* Calibration sequence: 0xB0/0xB1/0xB3/0x30 */
+        buf[0] = 0x00; ret = ascot3_write_regs(dev, 0xB0, buf, 1); if (ret) goto fail;
+        buf[0] = 0xE0; ret = ascot3_write_regs(dev, 0x30, buf, 1); if (ret) goto fail;
+        buf[0] = 0x1E; ret = ascot3_write_regs(dev, 0xB1, buf, 1); if (ret) goto fail;
+        buf[0] = 0x02; ret = ascot3_write_regs(dev, 0xB3, buf, 1); if (ret) goto fail;
+        buf[0] = 0x00; ret = ascot3_write_regs(dev, 0xB3, buf, 1); if (ret) goto fail;
+        buf[0] = 0x00; ret = ascot3_write_regs(dev, 0xB1, buf, 1); if (ret) goto fail;
+        buf[0] = 0xE1; ret = ascot3_write_regs(dev, 0x30, buf, 1); if (ret) goto fail;
+        buf[0] = 0x01; ret = ascot3_write_regs(dev, 0xB0, buf, 1); if (ret) goto fail;
+
+        /* reg 0x67 = 0, reg 0x74 = 2 */
+        buf[0] = 0x00; ret = ascot3_write_regs(dev, 0x67, buf, 1); if (ret) goto fail;
+        buf[0] = 0x02; ret = ascot3_write_regs(dev, 0x74, buf, 1); if (ret) goto fail;
+
+        /* reg 0x5E = {0x15, 0x00, 0x00} */
+        buf[0] = 0x15; buf[1] = 0x00; buf[2] = 0x00;
+        ret = ascot3_write_regs(dev, 0x5E, buf, 3);
+        if (ret != HDTVMATE_OK) goto fail;
+
+        /* reg 0x88 = 0, reg 0x87 = 0xC0, reg 0x80 = 1 */
+        buf[0] = 0x00; ret = ascot3_write_regs(dev, 0x88, buf, 1); if (ret) goto fail;
+        buf[0] = 0xC0; ret = ascot3_write_regs(dev, 0x87, buf, 1); if (ret) goto fail;
+        buf[0] = 0x01; ret = ascot3_write_regs(dev, 0x80, buf, 1); if (ret) goto fail;
+    }
+
+fail:
     /* Disable I2C repeater */
     cxd6801_i2c_repeater_enable(dev, false);
 
+    if (ret != HDTVMATE_OK) {
+        LOG_ERR("ASCOT3 X_pon failed: %d", ret);
+        return ret;
+    }
     dev->tuner_initialized = true;
-    LOG_INFO("ASCOT3 tuner initialized");
+    LOG_INFO("ASCOT3 tuner initialized (X_pon complete)");
     return HDTVMATE_OK;
 }
 
@@ -546,25 +647,23 @@ hdtvmate_error_t cxd6801_tuner_tune(cxd6801_device_t *dev, uint32_t frequency_kh
     ret = cxd6801_i2c_repeater_enable(dev, true);
     if (ret != HDTVMATE_OK) return ret;
 
-    /* Step 1: X_oscen - VCO enable + clock setup */
+    /* Step 1: X_oscen — read+write reg 0x74=0x02, write reg 0x87={0xC4,0x40}.
+     * Sony's per-tune trace doesn't touch reg 0x82 or 0x84. */
     ret = ascot3_x_oscen(dev, frequency_khz, true /* vco_cal first tune */);
     if (ret != HDTVMATE_OK) {
         LOG_ERR("X_oscen failed: %d", ret);
         goto done;
     }
 
-    /* Step 2: X_tune - filter/gain/AGC configuration */
+    /* Step 2: X_tune — LNA, RF filter, 0x5E tune data, 0x67 PLL ctrl,
+     * 0x68 17-byte tune burst, 50ms wait, post-tune writes (0x88=0,
+     * 0x87=0xC0). All inside ascot3_x_tune now to match Sony's exact
+     * order with the I2C repeater still enabled. */
     ret = ascot3_x_tune(dev, frequency_khz, tv_system, true);
     if (ret != HDTVMATE_OK) {
         LOG_ERR("X_tune failed: %d", ret);
         goto done;
     }
-
-    /* Step 3: Wait for PLL lock
-     * The ASCOT3 PLL typically locks within 20-50ms.
-     * sony_cxd6801_ascot3_Tune uses a timeout of ~100ms.
-     */
-    br_user_delay(50);
 
     /* Store current frequency */
     dev->frequency_khz = frequency_khz;
