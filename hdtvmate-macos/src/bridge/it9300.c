@@ -127,7 +127,7 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8DB, 0x00);
         /* Note: gpio14 (TS-E) and gpio15 (TS-A) are USED — leave alone */
 
-        it9300_set_bit(dev, 0xDA58, 0, 0);             /* ts_in_src = serial */
+        it9300_set_bit(dev, 0xDA58, 0, 0);             /* ts_in_src = serial (Linux default) */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x01); /* ts0_aggre_mode */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA78, 0x47); /* ts0_sync_byte = 0x47 */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA4C, 0x01); /* ts0_en */
