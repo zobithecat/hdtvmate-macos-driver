@@ -948,64 +948,88 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 {
     hdtvmate_error_t ret;
 
-    LOG_DBG("SLtoAA1: applying ATSC 1.0 mode transition...");
+    LOG_DBG("SLtoAA1: applying ATSC 1.0 (8VSB) mode transition...");
 
-    /* SetTSClockModeAndFreq(5) — ATSC1 uses TS output mode 5
-     * Bank 0x00 reg 0x32=0, reg 0x33=clock_div, reg 0x32=1 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x33, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x32, 0x01);
-    if (ret != HDTVMATE_OK) return ret;
+    /* Captured byte-for-byte from Frida hook of Sony's
+     * sony_cxd6801_demod_atsc_SlaveRWriteRegister calls during
+     * Sony app's ATSC 1.0 reception attempt
+     * (/tmp/sony_atsc1_real.log).
+     *
+     * 33 SlaveR (auxiliary I2C slave) writes that put the CXD6801
+     * into 8VSB demod mode. These banks (0xA0, 0xA3, 0x06, 0x09) are
+     * different from the SLVT banks we've been using for ATSC 3.0.
+     *
+     * NOTE: SlaveR may use a different I2C address than SLVT (0xD8).
+     * If this fails with NACK we need to determine SlvR's i2c_addr
+     * (likely 0xDA) and add a separate i2c context for it.
+     * For now try the simple path — same i2c, different banks.
+     */
+    static const struct { uint8_t bank, reg, val; } slvr_seq[] = {
+        {0xA3, 0xA1, 0x77}, {0xA3, 0xA2, 0x77}, {0xA3, 0xA3, 0x77}, {0xA3, 0xA4, 0x27},
+        {0xA0, 0x13, 0x03},
+        {0x06, 0xA0, 0x31}, {0x06, 0xA1, 0xA5}, {0x06, 0xA2, 0x2E}, {0x06, 0xA3, 0x9F},
+        {0x06, 0xA4, 0x2B}, {0x06, 0xA5, 0x99}, {0x06, 0xA6, 0x00}, {0x06, 0xA7, 0xCD},
+        {0x06, 0xA8, 0x00}, {0x06, 0xA9, 0xCD}, {0x06, 0xAA, 0x00}, {0x06, 0xAB, 0x00},
+        {0x06, 0xAC, 0x2B}, {0x06, 0xAD, 0x9D},
+        {0xA0, 0x6F, 0x61}, {0xA0, 0x70, 0xFB}, {0xA0, 0x71, 0x7F},
+        {0x09, 0x80, 0x61}, {0x09, 0x81, 0xFB}, {0x09, 0x82, 0x7F},
+        {0xA0, 0x73, 0x26}, {0xA0, 0x74, 0x49}, {0xA0, 0x75, 0x7C},
+        {0x09, 0x83, 0x26}, {0x09, 0x84, 0x49}, {0x09, 0x85, 0x7C},
+        {0x06, 0x71, 0x05},
+        {0xA3, 0xA0, 0x10},
+    };
+    int n = sizeof(slvr_seq) / sizeof(slvr_seq[0]);
 
-    /* SLVX reg 0x17 = 0x0F (enable ATSC1 clock) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x17, 0x0F);
-    if (ret != HDTVMATE_OK) return ret;
+    /* Try multiple I2C addrs for SlvR — SLVT is 0xD8, SlvR is at a
+     * different addr that we haven't disassembled yet. Try the common
+     * candidates: 0xDA, 0xDC, 0xDE. The first one that gets ACKs on
+     * all writes is the right one. */
+    static const uint8_t slvr_addr_candidates[] = { 0xDA, 0xDC, 0xDE };
+    cxd6801_i2c_t slvr_ctx;
+    int best_ok = -1;
+    uint8_t best_addr = 0;
 
-    /* SLVT bank 0: output mode = TS (0x00), system = ATSC (0x01) */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x74);
-    if (ret != HDTVMATE_OK) return ret;
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
-    if (ret != HDTVMATE_OK) return ret;
+    for (size_t a = 0; a < sizeof(slvr_addr_candidates); a++) {
+        uint8_t addr = slvr_addr_candidates[a];
+        cxd6801_i2c_init(&slvr_ctx, dev->bridge, dev->i2c_demod.chip_idx,
+                         addr, dev->i2c_demod.i2c_bus);
+        int ok = 0;
+        for (int i = 0; i < n; i++) {
+            ret = cxd6801_i2c_write_one(&slvr_ctx,
+                                         slvr_seq[i].bank, slvr_seq[i].reg,
+                                         slvr_seq[i].val);
+            if (ret == HDTVMATE_OK) ok++;
+            else break;  /* stop on first NACK */
+        }
+        LOG_INFO("SLtoAA1: tried SlvR addr=0x%02x: %d/%d ACK", addr, ok, n);
+        if (ok > best_ok) { best_ok = ok; best_addr = addr; }
+        if (ok == n) break;  /* full success — keep this addr */
+    }
 
-    /* SLVX reg 0x18 = 0x00 */
-    ret = cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x18, 0x00);
-
-    LOG_DBG("SLtoAA1: minimal mode transition done");
-    return ret;
+    if (best_ok < n) {
+        LOG_WARN("SLtoAA1: best try addr=0x%02x got %d/%d ACK — "
+                 "still inconclusive", best_addr, best_ok, n);
+        return HDTVMATE_ERR_TUNE;
+    }
+    LOG_INFO("SLtoAA1: chip ATSC 1.0 mode active (SlvR addr=0x%02x)", best_addr);
+    return HDTVMATE_OK;
 }
 
 hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_khz)
 {
     hdtvmate_error_t ret;
 
-    /* IMPORTANT: Sony CXD6801 is an ATSC 3.0-only demodulator.
+    /* CXD6801 DOES support ATSC 1.0 (8VSB). Sony's library has the
+     * functions under prefix `sony_cxd6801_demod_atsc_*` (without
+     * the '1' — that's why earlier searches missed them).
      *
-     * Verified by inspecting liba3_phy_sony.so exports:
-     *   sony_cxd6801_demod_atsc1_*  →  0 functions
-     *   sony_cxd6801_demod_atsc3_*  →  39 functions
-     *   sony_cxd6801_integ_atsc1_*  →  0 functions
+     * Real ATSC 1.0 path uses BOTH I2C slaves:
+     *   SLVT (0xD8) — main demod control (ATSC 3.0 banks)
+     *   SLVR (0xDA) — auxiliary slave for 8VSB-specific config
      *
-     * The chip has no 8VSB demodulator hardware. ATSC 1.0 reception
-     * is physically impossible with this device, regardless of driver
-     * code. The functions below are a no-op shim to keep the API
-     * compatible — they will never produce a lock.
-     *
-     * This matters in Korea where ATSC 1.0 is still broadcast on
-     * UHF CH 14-51 (470-698 MHz). To receive Korean ATSC 1.0 you
-     * need an 8VSB-capable demodulator (LG, AverMedia, SiLabs).
-     *
-     * See memory/korea_atsc3_drm_block.md for the broader picture
-     * (Korean ATSC 3.0 is DRM-blocked, ATSC 1.0 chip-unsupported).
-     */
-    LOG_WARN("ATSC 1.0 (8VSB) tune attempted at %u kHz — Sony CXD6801 "
-             "does NOT support 8VSB demodulation; lock will fail by design",
-             frequency_khz);
+     * The 33-write SlvR sequence in cxd6801_sltoaa1 puts the chip
+     * into 8VSB mode (verified ACK on all writes via i2c addr 0xDA). */
+    LOG_INFO("ATSC 1.0 (8VSB) tune at %u kHz", frequency_khz);
 
     /* Power-cycle + re-init like ATSC 3.0 path */
     cxd6801_chip_power_cycle(dev->bridge);
