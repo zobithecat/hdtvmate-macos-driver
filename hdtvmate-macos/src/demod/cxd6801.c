@@ -120,6 +120,16 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
 
     LOG_INFO("Initializing CXD6801 demodulator...");
 
+    /* Sony's chip-init starts with DA5A=0x1f as the FIRST bridge write
+     * (live capture: DRV_CXD6801_initialize entry → DA5A=0x1F → first
+     * SLVX i2c write). Without this, chip starts in wrong state. */
+    extern hdtvmate_error_t br_cmd_write_registers(it9300_device_t *dev,
+        uint8_t processor, uint32_t addr, const uint8_t *values, uint8_t len);
+    {
+        uint8_t v = 0x1F;
+        br_cmd_write_registers(dev->bridge, IT9300_PROCESSOR_LINK, 0xDA5A, &v, 1);
+    }
+
     /* Read and verify chip ID */
     ret = cxd6801_read_chip_id(dev);
     if (ret != HDTVMATE_OK) {
@@ -255,6 +265,21 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         hdtvmate_error_t atecc_ret = cxd6801_atecc_unlock_slvr(dev);
         if (atecc_ret != HDTVMATE_OK) {
             LOG_WARN("ATECC chip-status check failed: %d", atecc_ret);
+        }
+    }
+
+    /* Sony's bridge DA-range burst (after ATECC, before final SLVT writes).
+     * Captured at 1778331828.192-215. Configures i2c master timing. */
+    {
+        struct { uint16_t addr; uint8_t val; } da_writes[] = {
+            { 0xDA34, 0x01 }, { 0xDA58, 0x00 }, { 0xDA51, 0xBC },
+            { 0xDA73, 0x00 }, { 0xDA5F, 0x7A }, { 0xDA60, 0x61 },
+            { 0xDA61, 0x33 }, { 0xDA62, 0x00 }, { 0xDA4C, 0x01 },
+            { 0xDA5A, 0x1F },
+        };
+        for (size_t i = 0; i < sizeof(da_writes)/sizeof(da_writes[0]); i++) {
+            br_cmd_write_registers(dev->bridge, IT9300_PROCESSOR_LINK,
+                                    da_writes[i].addr, &da_writes[i].val, 1);
         }
     }
 

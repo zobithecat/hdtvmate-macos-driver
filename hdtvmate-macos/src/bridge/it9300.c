@@ -46,128 +46,90 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
     dev->cmd_seq = 0;
     hdtvmate_error_t ret;
 
-    LOG_INFO("IT9300 initialization (Sony Frida-captured sequence)...");
+    LOG_INFO("IT9300 initialization (Sony byte-exact sequence — live BrCmd capture)...");
 
     /*
-     * INIT SEQUENCE — captured chronologically from
-     * /tmp/sony_init_complete.txt by hooking IT9300_writeRegister
-     * during fresh app launch (HDTV Player v2.32). The order matters:
-     * power-enable BEFORE GPIO config, init-flags BEFORE TS-bus setup.
+     * Bridge init — REWRITE 2026-05-09 to byte-exact Sony order via live
+     * Frida capture of BrCmd_writeRegisters/readRegisters. Previous version
+     * had wrong order + wrong DA-range placement (those go in chip-init,
+     * not bridge init). Captured sequence in /tmp/sony_bridge3.log.
      */
 
-    /* Sony's exact init order (NO early reset, NO D8E4/E5/E3 power):
-     *   1. 4976/4BFB/4978/4977 = 0  (init flags)
-     *   2. F6A7/F103 = 7            (I2C clock)
-     *   3. DA1A = 0                 (then setOutTsType + configOutput)
-     *   ...
-     *   final: D8B7 = 0, sleep, D8B7 = 1  (chip reset at the END)
-     *
-     * Our previous version did reset+power at the START which Sony
-     * never does. Removed; reset moved to end of init. */
+    /* === Stage 1: power-up (Sony's first writes) === */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA05, 0x01);  /* power on */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x01);  /* GPIO up */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B8, 0x01);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B9, 0x01);
+    /* Reset cycle */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x00);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x01);
+    /* Additional GPIO power up */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E4, 0x01);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E5, 0x01);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E3, 0x01);
 
-    /* Init flags */
+    /* === Stage 2: init flags clear === */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4976, 0x00);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4BFB, 0x00);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4978, 0x00);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4977, 0x00);
 
-    /* I2C clock speed (bus 1,2,3 = 366kHz at val 0x07) */
+    /* === Stage 3: I2C master clock (bus 1/2/3 = 366kHz, val 0x07) === */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xF6A7, 0x07);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xF103, 0x07);
 
-    /* TS streaming setup — derived from Linux kernel it930x_init in
-     * drivers/media/usb/dvb-usb-v2/af9035.c. This is the proven streaming
-     * sequence for the IT9303/IT9300 chip family. Sony's Frida-captured
-     * sequence had some omissions (no DD88/89/8A/8B frame-size writes,
-     * no DA78 sync byte) that prevented EP 0x84 from forwarding TS data
-     * even though all the "easy" registers were correct.
-     *
-     * USB 2.0 (HIGH speed): frame_size = 87*188/4 = 4089 (0x0FF9),
-     *                       packet_size = 512/4 = 128 (0x80)
-     */
+    /* === Stage 4: TS path setup ===
+     * Sony reads each register first (RMW pattern). We write final values
+     * directly since we know the targets. */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA1A, 0x00);  /* ignore_sync */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xF41F, 0x04);  /* dvbt_inten bit 2 */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA10, 0x00);  /* mpeg_full_speed off */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xF41A, 0x05);  /* dvbt_en bit 0 + bit 2 */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA1D, 0x01);  /* mp2_sw_rst */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD11, 0x0F);  /* ep4_tx_en off (clear bit 5) */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD13, 0x1B);  /* ep4_tx_nak off */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD11, 0x2F);  /* ep4_tx_en on (set bit 5) */
+    /* DD88 = 2-byte burst {0x00, 0x99} (frame size 0x9900) */
     {
-        /* Frame size 0x9900 (Sony) — NOT Linux af9035's 87*188/4=0x0FF9.
-         * Captured byte-for-byte from /tmp/sony_init_complete.txt. */
-
-        it9300_set_bit(dev, 0xDA1A, 0, 0);           /* ignore_sync_byte */
-
-        /* setOutTsType (3 bits) */
-        it9300_set_bit(dev, 0xF41F, 2, 1);           /* dvbt_inten */
-        it9300_set_bit(dev, 0xDA10, 0, 0);           /* mpeg_full_speed */
-        it9300_set_bit(dev, 0xF41A, 0, 1);           /* dvbt_en */
-
-        /* configOutput */
-        it9300_set_bit(dev, 0xDA1D, 0, 1);           /* mp2_sw_rst */
-        it9300_set_bit(dev, 0xDD11, 5, 0);           /* ep4_tx_en disable */
-        it9300_set_bit(dev, 0xDD13, 5, 0);           /* ep4_tx_nak disable */
-        it9300_set_bit(dev, 0xDD11, 5, 1);           /* ep4_tx_en enable */
-        /* Sony writes DD88/89 as a 2-byte burst = 0x9900. We previously
-         * had 0x0FF9 (Linux) and also wrote DD8A/8B/0D — Sony does
-         * neither. Removed 8A/8B/0D entirely. */
-        {
-            uint8_t fs[2] = { 0x00, 0x99 };
-            it9300_write_registers(dev, IT9300_PROCESSOR_LINK, 0xDD88, fs, 2);
-        }
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD0C, 0x80);
-        it9300_set_bit(dev, 0xDA05, 0, 0);           /* (Sony: missing register!) */
-        it9300_set_bit(dev, 0xDA06, 0, 0);           /* (Sony: missing register!) */
-        it9300_set_bit(dev, 0xDA1D, 0, 0);           /* mp2_sw_rst release */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD920, 0x00);  /* (Sony: missing!) */
-
-        /* Slew rate */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD833, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD830, 0x00);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD831, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD832, 0x00);
-
-        /* Removed: D8B0/B1/AF, D8C4/C5/C3, D8DC/DD/DB
-         * (Linux af9035 GPIOs not used on GTMedia HDTV Mate hardware).
-         * Removed: DA34/DA58/DA51/DA5F-62/DA73/DA78/DA4C/DA5A
-         * (speculative additions; Sony init body shows none of these).
-         * DA4C is written separately by enableTsPort at capture-start.
-         * D8D4/D5/D3, D8B8/B9 GPIO setup is below (post-init). */
-
-        /* DA78 sync byte = 0x47 — Linux af9035 sets this so the IT9300
-         * recognizes 0x47 as TS packet sync marker on incoming bus. */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA78, 0x47);
-
-        /* Sony's bridge init writes — discovered via live USB-layer Frida
-         * capture (1778326357.763-788). These configure i2c master timing
-         * and slot allocation for chip-internal subsystems including the
-         * SLVR proxy at 0x98. Without these, our writes to 0x98 NACK at
-         * the chip even though SLVT (0xD8) accepts them.
-         *
-         * Sony's exact values (overrides our previous 0xDA73=0x01 default): */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA34, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA58, 0x00);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA51, 0xBC);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x00);  /* Sony=0x00 not 0x01 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5F, 0x7A);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA60, 0x61);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA61, 0x33);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA62, 0x00);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA4C, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5A, 0x1F);
+        uint8_t fs[2] = { 0x00, 0x99 };
+        it9300_write_registers(dev, IT9300_PROCESSOR_LINK, 0xDD88, fs, 2);
     }
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD0C, 0x80);
 
-    /* Sony post-init flags */
+    /* === Stage 5: power finalization === */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA05, 0x00);  /* DA05 toggle off */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA06, 0x00);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA1D, 0x00);  /* release reset */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD920, 0x00);
+
+    /* === Stage 6: slew rate === */
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD833, 0x01);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD830, 0x00);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD831, 0x01);
+    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD832, 0x00);
+
+    /* === Stage 7: init flags set === */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4976, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4975, 0x38);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4971, 0x03);
 
-    /* Demod GPIO config (D8D4-B9 — used for HDTV Mate's demod path) */
+    /* === Stage 8: GPIO config === */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8D4, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8D5, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8D3, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B8, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B9, 0x01);
 
-    /* Second GPIO reset — Sony does this after all init is done.
-     * 500ms low gives the demod time to fully reset. */
+    /* === Stage 9: final reset cycle (chip warm-up) === */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x00);
     br_user_delay(500);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x01);
     br_user_delay(200);
+
+    /* NOTE: DA34/DA58/DA51/DA73/DA5F/DA60/DA61/DA62/DA4C/DA5A and DA78
+     * REMOVED from bridge init. Sony writes these INSIDE
+     * DRV_CXD6801_initialize (chip-init phase), not in bridge init.
+     * Will be added to cxd6801_initialize. */
 
     /* Get firmware version */
     uint32_t fw_ver = 0;
