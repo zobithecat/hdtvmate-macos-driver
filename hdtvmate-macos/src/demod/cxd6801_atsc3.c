@@ -1011,7 +1011,33 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
                  "still inconclusive", best_addr, best_ok, n);
         return HDTVMATE_ERR_TUNE;
     }
-    LOG_INFO("SLtoAA1: chip ATSC 1.0 mode active (SlvR addr=0x%02x)", best_addr);
+    LOG_INFO("SLtoAA1: SlvR mode entry done (addr=0x%02x)", best_addr);
+
+    /* SLVT (0xD8) side ATSC 1.0 setup — extracted from
+     * demod_atsc_Tune disassembly @ 0xe9400-0xe9598. Sony writes
+     * bank 2 register set after the SLtoAA SetTSClockModeAndFreq call.
+     *
+     * Confirmed values:
+     *   bank 2 reg 0x17 = 0x0F   (clock control)
+     *   bank 2 reg 0x2C = 0x01   (system = ATSC 1.0)
+     *   bank 2 reg 0x4B = 0x74
+     *
+     * Inferred values (matched to our previous "minimal port" stub
+     * which had these in bank 0 — Sony actually uses bank 2):
+     *   bank 2 reg 0xA9 = 0x00
+     *   bank 2 reg 0x49 = 0x00
+     *   bank 2 reg 0x18 = 0x00
+     */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x17, 0x0F);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xA9, 0x00);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x2C, 0x01);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x4B, 0x74);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x49, 0x00);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x18, 0x00);
+
+    /* Save SlvR addr in dev so subsequent functions can use it */
+    dev->slvr_addr = best_addr;
+    LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete");
     return HDTVMATE_OK;
 }
 
