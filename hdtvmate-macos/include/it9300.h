@@ -150,6 +150,7 @@ hdtvmate_error_t it9300_write_generic_registers(it9300_device_t *dev,
 hdtvmate_error_t it9300_enable_ts_port(it9300_device_t *dev, uint8_t port);
 hdtvmate_error_t it9300_disable_ts_port(it9300_device_t *dev, uint8_t port);
 hdtvmate_error_t it9300_config_output(it9300_device_t *dev);
+hdtvmate_error_t it9300_set_out_ts_type(it9300_device_t *dev);
 
 /* PID filtering */
 hdtvmate_error_t it9300_enable_pid_filter(it9300_device_t *dev, uint8_t port,

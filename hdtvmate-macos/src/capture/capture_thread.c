@@ -228,10 +228,8 @@ hdtvmate_error_t capture_start(capture_context_t *ctx, usb_device_t *usb,
     ctx->callback = callback;
     ctx->callback_data = user_data;
 
-    /* Enable TS port — pre-enable register sequence + DA4C=1.
-     * IT9300_initialize() already did setOutTsType + configOutput
-     * (Sony's order embeds those in init), so we only need
-     * enable_ts_port here. */
+    /* Sony only does enableTsPort = DA4C=1 at capture start.
+     * setOutTsType + configOutput are inside IT9300_initialize already. */
     it9300_enable_ts_port(bridge, 0);
 
     /* Initialize ring buffer */

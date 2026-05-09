@@ -55,18 +55,17 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
      * power-enable BEFORE GPIO config, init-flags BEFORE TS-bus setup.
      */
 
-    /* GPIO reset (early — D8B7 LOW→HIGH).
-     * Note: in our previous version we put GPIO config before reset and
-     * power enable AFTER. Sony does the reset first with no GPIO setup. */
-    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x00);
-    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x01);
+    /* Sony's exact init order (NO early reset, NO D8E4/E5/E3 power):
+     *   1. 4976/4BFB/4978/4977 = 0  (init flags)
+     *   2. F6A7/F103 = 7            (I2C clock)
+     *   3. DA1A = 0                 (then setOutTsType + configOutput)
+     *   ...
+     *   final: D8B7 = 0, sleep, D8B7 = 1  (chip reset at the END)
+     *
+     * Our previous version did reset+power at the START which Sony
+     * never does. Removed; reset moved to end of init. */
 
-    /* Power enable GPIO */
-    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E4, 0x01);
-    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E5, 0x01);
-    it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E3, 0x01);
-
-    /* Init flags (purpose unclear — possibly USB framing config) */
+    /* Init flags */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4976, 0x00);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4BFB, 0x00);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4978, 0x00);
@@ -87,64 +86,59 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
      *                       packet_size = 512/4 = 128 (0x80)
      */
     {
-        /* USB 2.0 high-speed values */
-        const uint16_t frame_size = 87 * 188 / 4;  /* 0x0FF9 */
-        const uint8_t  packet_size = 512 / 4;       /* 0x80 */
+        /* Frame size 0x9900 (Sony) — NOT Linux af9035's 87*188/4=0x0FF9.
+         * Captured byte-for-byte from /tmp/sony_init_complete.txt. */
 
         it9300_set_bit(dev, 0xDA1A, 0, 0);           /* ignore_sync_byte */
+
+        /* setOutTsType (3 bits) */
         it9300_set_bit(dev, 0xF41F, 2, 1);           /* dvbt_inten */
         it9300_set_bit(dev, 0xDA10, 0, 0);           /* mpeg_full_speed */
         it9300_set_bit(dev, 0xF41A, 0, 1);           /* dvbt_en */
-        it9300_set_bit(dev, 0xDA1D, 0, 1);           /* mp2_sw_rst, reset EP4 */
+
+        /* configOutput */
+        it9300_set_bit(dev, 0xDA1D, 0, 1);           /* mp2_sw_rst */
         it9300_set_bit(dev, 0xDD11, 5, 0);           /* ep4_tx_en disable */
         it9300_set_bit(dev, 0xDD13, 5, 0);           /* ep4_tx_nak disable */
         it9300_set_bit(dev, 0xDD11, 5, 1);           /* ep4_tx_en enable */
-        it9300_set_bit(dev, 0xDD11, 6, 0);           /* ep5_tx_en disable (single-port) */
-        it9300_set_bit(dev, 0xDD13, 6, 0);           /* ep5_tx_nak disable */
-        it9300_set_bit(dev, 0xDD11, 6, 0);           /* ep5_tx_en stay disabled */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD88, frame_size & 0xFF);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD89, (frame_size >> 8) & 0xFF);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD0C, packet_size);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD8A, frame_size & 0xFF);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD8B, (frame_size >> 8) & 0xFF);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD0D, packet_size);
-        it9300_set_bit(dev, 0xDA1D, 0, 0);           /* mp2_sw_rst, release */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD833, 0x01);  /* slew rate */
+        /* Sony writes DD88/89 as a 2-byte burst = 0x9900. We previously
+         * had 0x0FF9 (Linux) and also wrote DD8A/8B/0D — Sony does
+         * neither. Removed 8A/8B/0D entirely. */
+        {
+            uint8_t fs[2] = { 0x00, 0x99 };
+            it9300_write_registers(dev, IT9300_PROCESSOR_LINK, 0xDD88, fs, 2);
+        }
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD0C, 0x80);
+        it9300_set_bit(dev, 0xDA05, 0, 0);           /* (Sony: missing register!) */
+        it9300_set_bit(dev, 0xDA06, 0, 0);           /* (Sony: missing register!) */
+        it9300_set_bit(dev, 0xDA1D, 0, 0);           /* mp2_sw_rst release */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD920, 0x00);  /* (Sony: missing!) */
+
+        /* Slew rate */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD833, 0x01);
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD830, 0x00);
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD831, 0x01);
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD832, 0x00);
 
-        /* Suspend unused TS ports (TS-A,B,C,D,E gpios) — keeps unused
-         * inputs from generating spurious activity. */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B0, 0x01); /* TS-C gpio1 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B1, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8AF, 0x00);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8C4, 0x01); /* TS-D gpio7 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8C5, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8C3, 0x00);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8DC, 0x01); /* TS-B gpio13 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8DD, 0x01);
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8DB, 0x00);
-        /* Note: gpio14 (TS-E) and gpio15 (TS-A) are USED — leave alone */
+        /* Removed: D8B0/B1/AF, D8C4/C5/C3, D8DC/DD/DB
+         * (Linux af9035 GPIOs not used on GTMedia HDTV Mate hardware).
+         * Removed: DA34/DA58/DA51/DA5F-62/DA73/DA78/DA4C/DA5A
+         * (speculative additions; Sony init body shows none of these).
+         * DA4C is written separately by enableTsPort at capture-start.
+         * D8D4/D5/D3, D8B8/B9 GPIO setup is below (post-init). */
 
-        /* Sony's pre-enable extras (not in Linux it930x_init but Sony writes
-         * these between EP4 setup and TS port enable). Captured from
-         * /tmp/sony_init_complete.txt. */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA34, 0x01); /* TS packet length */
-        it9300_set_bit(dev, 0xDA58, 0, 0);                                /* ts_in_src = serial */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA51, 0xBC); /* TS pkt cfg */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5F, 0x7A); /* TS clk div 1 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA60, 0x61); /* TS clk div 2 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA61, 0x33); /* TS clk div 3 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA62, 0x00); /* TS clk div 4 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x01); /* ts0_aggre_mode */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA78, 0x47); /* ts0_sync_byte = 0x47 */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA4C, 0x01); /* ts0_en */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5A, 0x1F); /* ts_fail_ignore */
+        /* DA78 sync byte = 0x47 — Linux af9035 sets this so the IT9300
+         * recognizes 0x47 as TS packet sync marker on incoming bus.
+         * Sony's IT9300_initialize trace does NOT contain this write,
+         * but TS data is structured around 0x47 sync, so the bridge
+         * may need it for chunk framing. Keep it. */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA78, 0x47);
+        /* DA73 = 1 = TS aggregation mode (collect multiple packets per
+         * USB transfer for efficiency). Sony omits but af9035 sets. */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x01);
     }
 
-    /* Sony-specific post-init flags (not in Linux it930x_init but Sony's
-     * captured trace does them — possibly GTMedia-specific). */
+    /* Sony post-init flags */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4976, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4975, 0x38);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0x4971, 0x03);
@@ -297,14 +291,13 @@ hdtvmate_error_t it9300_write_generic_registers(it9300_device_t *dev,
 
 hdtvmate_error_t it9300_enable_ts_port(it9300_device_t *dev, uint8_t port)
 {
-    /* it9300_initialize() already enables TS port 0 via the Linux
-     * it930x_init sequence (writes 0xDA4C=1, 0xDA5A=0x1F, etc.). This
-     * function is idempotent — re-asserts those for the requested port
-     * in case capture is started after a sleep cycle. */
-    LOG_DBG("Enabling TS port %d (re-assert)", port);
-    it9300_write_register(dev, IT9300_PROCESSOR_LINK,
-                          IT9300_REG_TS_OUTPUT_MODE + port, 0x01);
-    return it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5A, 0x1F);
+    /* Sony's enableTsPort body (verified from /tmp/sony_init_complete.txt)
+     * is just ONE write: DA4C = 1. We previously also wrote DA5A=0x1F
+     * (from Linux af9035) but Sony does NOT do this — captured trace
+     * shows zero DA5A writes anywhere. Removed. */
+    LOG_DBG("Enabling TS port %d", port);
+    return it9300_write_register(dev, IT9300_PROCESSOR_LINK,
+                                  IT9300_REG_TS_OUTPUT_MODE + port, 0x01);
 }
 
 hdtvmate_error_t it9300_disable_ts_port(it9300_device_t *dev, uint8_t port)
@@ -331,37 +324,67 @@ static hdtvmate_error_t it9300_set_bit(it9300_device_t *dev, uint16_t reg,
 
 hdtvmate_error_t it9300_config_output(it9300_device_t *dev)
 {
-    /* Equivalent of IT9300_setOutTsType(handle, port=0) — disassembled
-     * from liba3_phy_sony.so @ 0x18ce7c. Writes the streaming-format
-     * control bits the IT9300 firmware needs before EP 0x84 will
-     * actually forward TS data. Without these, enableTsPort succeeds
-     * but bulk reads time out (no data flowing).
+    /* IT9300_configOutput(port=0) — exact byte-by-byte match of Sony's
+     * configOutput function, captured via Frida WRB/WR events at the
+     * very moment of IT9300_initialize:
      *
-     * Verified bit values via Frida-captured WRB events from app's
-     * IT9300_setOutTsType call (in /tmp/sony_init_complete.txt):
-     *   F41F bit 2 = 1
-     *   DA10 bit 0 = 0   (← we previously had 1, breaking streaming)
-     *   F41A bit 0 = 1
-     *   DA1D bit 0 = 1
-     *   DD11 bit 5 = 0, DD13 bit 5 = 0, DD11 bit 5 = 1 (toggle)
-     *   DA05 bit 0 = 0   (← we previously had 1)
-     *   DA06 bit 0 = 0   (← we previously had 1)
-     *   DA1D bit 0 = 0
+     *   /tmp/sony_init_complete.txt configOutput body:
+     *     DA1D bit 0 = 1                 mp2_sw_rst (reset EP4)
+     *     DD11 bit 5 = 0                 ep4_tx_en disable
+     *     DD13 bit 5 = 0                 ep4_tx_nak disable
+     *     DD11 bit 5 = 1                 ep4_tx_en enable
+     *     DD88/89 = 0x00, 0x99           frame_size LSB/MSB = 0x9900
+     *     DD0C    = 0x80                 packet_size
+     *     DA05 bit 0 = 0
+     *     DA06 bit 0 = 0
+     *     DA1D bit 0 = 0                 release reset
+     *     D920    = 0x00
+     *
+     * Critical streaming-trigger registers we previously omitted:
+     *   - DA05/DA06 bit 0 = 0 (TS-output state-machine arming?)
+     *   - D920 = 0
+     *   - DD88/89 = 0x9900 (Sony-specific frame_size, NOT Linux af9035's
+     *     0x0FF9 = 87*188/4)
      */
-    LOG_DBG("Configuring TS output (Sony setOutTsType sequence)...");
+    LOG_DBG("IT9300 configOutput (Sony exact byte sequence)...");
     hdtvmate_error_t ret;
 
-    ret = it9300_set_bit(dev, 0xF41F, 2, 1); if (ret) return ret;
-    ret = it9300_set_bit(dev, 0xDA10, 0, 0); if (ret) return ret;
-    ret = it9300_set_bit(dev, 0xF41A, 0, 1); if (ret) return ret;
     ret = it9300_set_bit(dev, 0xDA1D, 0, 1); if (ret) return ret;
     ret = it9300_set_bit(dev, 0xDD11, 5, 0); if (ret) return ret;
     ret = it9300_set_bit(dev, 0xDD13, 5, 0); if (ret) return ret;
     ret = it9300_set_bit(dev, 0xDD11, 5, 1); if (ret) return ret;
+
+    /* DD88 = 0x00, DD89 = 0x99 — Sony writes these as a 2-byte burst
+     * starting at DD88. frame_size = 0x9900 = 39168 (NOT 0x0FF9). */
+    {
+        uint8_t fs[2] = { 0x00, 0x99 };
+        ret = it9300_write_registers(dev, IT9300_PROCESSOR_LINK, 0xDD88, fs, 2);
+        if (ret) return ret;
+    }
+    ret = it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDD0C, 0x80);
+    if (ret) return ret;
+
     ret = it9300_set_bit(dev, 0xDA05, 0, 0); if (ret) return ret;
     ret = it9300_set_bit(dev, 0xDA06, 0, 0); if (ret) return ret;
     ret = it9300_set_bit(dev, 0xDA1D, 0, 0); if (ret) return ret;
 
+    ret = it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD920, 0x00);
+    return ret;
+}
+
+hdtvmate_error_t it9300_set_out_ts_type(it9300_device_t *dev)
+{
+    /* IT9300_setOutTsType(port=0) — exact byte sequence from
+     * /tmp/sony_init_complete.txt setOutTsType body (3 bits only):
+     *   F41F bit 2 = 1   (dvbt_inten)
+     *   DA10 bit 0 = 0   (mpeg_full_speed)
+     *   F41A bit 0 = 1   (dvbt_en)
+     */
+    LOG_DBG("IT9300 setOutTsType...");
+    hdtvmate_error_t ret;
+    ret = it9300_set_bit(dev, 0xF41F, 2, 1); if (ret) return ret;
+    ret = it9300_set_bit(dev, 0xDA10, 0, 0); if (ret) return ret;
+    ret = it9300_set_bit(dev, 0xF41A, 0, 1); if (ret) return ret;
     return HDTVMATE_OK;
 }
 

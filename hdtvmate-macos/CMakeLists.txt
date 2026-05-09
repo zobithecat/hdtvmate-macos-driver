@@ -98,5 +98,9 @@ target_link_libraries(test_lock_extended hdtvmate_core)
 add_executable(long_lock_test src/tools/long_lock_test.c)
 target_link_libraries(long_lock_test hdtvmate_core)
 
+# --- Real-time SNR / sync_stat monitor for antenna tuning ---
+add_executable(snr_monitor src/tools/snr_monitor.c)
+target_link_libraries(snr_monitor hdtvmate_core)
+
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
