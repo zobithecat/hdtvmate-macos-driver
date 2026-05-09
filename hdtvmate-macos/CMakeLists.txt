@@ -63,6 +63,12 @@ target_link_libraries(hdtvmate_tune_test hdtvmate_core)
 add_executable(slvr_bus_probe src/tools/slvr_bus_probe.c)
 target_link_libraries(slvr_bus_probe hdtvmate_core)
 
+add_executable(slvr_replay_sony src/tools/slvr_replay_sony.c)
+target_link_libraries(slvr_replay_sony hdtvmate_core)
+
+add_executable(slvr_no_init src/tools/slvr_no_init.c)
+target_link_libraries(slvr_no_init hdtvmate_core)
+
 # --- CLI tool: full reset scan ---
 add_executable(hdtvmate_resetscan src/tools/full_reset_scan.c)
 target_link_libraries(hdtvmate_resetscan hdtvmate_core)
