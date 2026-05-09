@@ -107,6 +107,31 @@ int main(void)
         printf("ret=%d\n", ret);
     }
 
+    /* mbox-routing probe: byte[1] of packet, sweep for 0x98 (no bus byte format) */
+    printf("\n=== mbox byte probe for i2c=0x98 (no bus byte) ===\n");
+    uint8_t test_mbox[] = { 0x00, 0x01, 0x02, 0x04, 0x08, 0x10, 0x18, 0x20, 0x30, 0x40, 0x80, 0xC0, 0xFF };
+    for (size_t i = 0; i < sizeof(test_mbox); i++) {
+        uint8_t m = test_mbox[i];
+        uint16_t cmd = ((uint16_t)m << 8) | 0x2B;
+        printf("[mbox=0x%02x cmd=0x%04x] i2c=0x98 reg=0x00 = 0x01: ", m, cmd);
+        fflush(stdout);
+        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
+        ret = br_cmd_send(&bridge, cmd, tx, sizeof(tx), NULL, 0);
+        printf("ret=%d\n", ret);
+    }
+
+    /* mbox=0x10 + sweep bus byte (with bus byte format). Maybe SLVR is on
+     * bus 2 (where avl6381 init sets I2C_SPEED_366K via reg 0xf6a7) and
+     * bus byte = 2 would route correctly. */
+    printf("\n=== mbox=0x10 + bus byte sweep for i2c=0x98 (with bus byte) ===\n");
+    for (uint8_t bus = 0; bus < 4; bus++) {
+        printf("[mbox=0x10 bus=%d] i2c=0x98 reg=0x00 = 0x01: ", bus);
+        fflush(stdout);
+        uint8_t tx[] = { 1, bus, 0x98, 0x00, 0x01 };
+        ret = br_cmd_send(&bridge, 0x102B, tx, sizeof(tx), NULL, 0);
+        printf("ret=%d\n", ret);
+    }
+
     cxd6801_deinit(&demod);
     it9300_deinit(&bridge);
     usb_close(&usb);
