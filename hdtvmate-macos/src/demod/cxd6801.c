@@ -192,6 +192,21 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
         tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_SLVT; tx[3]=0x23; tx[4]=0x03;
         ret = br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+
+        /* SLVX subsystem enable — discovered via Sony live USB-layer capture
+         * (1778326357.558-570). These writes follow SLVT bank 0x95 setup and
+         * appear to enable chip-internal subsystems (likely SLVR/mailbox).
+         * Without them, i2c=0x98 SLVR proxy writes are NACK'd by chip. */
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x00; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x1A; tx[4]=0x01;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x00; tx[4]=0x00;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x1A; tx[4]=0x01;
+        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
+        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x08; tx[4]=0x01;
+        ret = br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
     }
 
     if (ret != HDTVMATE_OK) {

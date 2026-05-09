@@ -128,14 +128,26 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
          * D8D4/D5/D3, D8B8/B9 GPIO setup is below (post-init). */
 
         /* DA78 sync byte = 0x47 — Linux af9035 sets this so the IT9300
-         * recognizes 0x47 as TS packet sync marker on incoming bus.
-         * Sony's IT9300_initialize trace does NOT contain this write,
-         * but TS data is structured around 0x47 sync, so the bridge
-         * may need it for chunk framing. Keep it. */
+         * recognizes 0x47 as TS packet sync marker on incoming bus. */
         it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA78, 0x47);
-        /* DA73 = 1 = TS aggregation mode (collect multiple packets per
-         * USB transfer for efficiency). Sony omits but af9035 sets. */
-        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x01);
+
+        /* Sony's bridge init writes — discovered via live USB-layer Frida
+         * capture (1778326357.763-788). These configure i2c master timing
+         * and slot allocation for chip-internal subsystems including the
+         * SLVR proxy at 0x98. Without these, our writes to 0x98 NACK at
+         * the chip even though SLVT (0xD8) accepts them.
+         *
+         * Sony's exact values (overrides our previous 0xDA73=0x01 default): */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA34, 0x01);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA58, 0x00);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA51, 0xBC);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA73, 0x00);  /* Sony=0x00 not 0x01 */
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5F, 0x7A);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA60, 0x61);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA61, 0x33);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA62, 0x00);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA4C, 0x01);
+        it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA5A, 0x1F);
     }
 
     /* Sony post-init flags */
