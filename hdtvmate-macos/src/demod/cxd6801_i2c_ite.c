@@ -143,16 +143,35 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
      * CMD 0x2A combined (4-byte) format was tested but returned 0xFF/0x00
      * on this firmware version. Using split: write reg ptr + read.
      */
-    /* SLVT/SLVR ops via i2c->i2c_addr — works for both 0xD8 and 0xDA.
-     * bank select [0x00, bank] + reg ptr [reg] + read via CMD 0x2A */
+    /* SLVT/SLVR ops via i2c->i2c_addr — works for both 0xD8 and 0x30.
+     * bank select [0x00, bank] + reg ptr [reg] + read via CMD 0x2A.
+     *
+     * For chip-internal slaves (i2c=0x30 SLVR-read), Sony's live capture
+     * shows the set-reg-ptr sub-write is wrapped with bridge reg 0xF424
+     * = 1 / 0. SLVT (0xD8) works without it. */
+    extern hdtvmate_error_t br_cmd_write_registers(it9300_device_t *dev,
+                                                    uint8_t processor,
+                                                    uint32_t addr,
+                                                    const uint8_t *values,
+                                                    uint8_t len);
+    bool need_f424 = (i2c->i2c_addr == 0x30);
+
     ret = cxd6801_i2c_select_bank(i2c, bank);
     if (ret != HDTVMATE_OK) return ret;
 
+    if (need_f424) {
+        uint8_t v = 1;
+        br_cmd_write_registers(i2c->bridge, 0, 0xF424, &v, 1);
+    }
     tx_reg[0] = 1;
     tx_reg[1] = i2c->i2c_bus;
-    tx_reg[2] = i2c->i2c_addr;  /* 0xD8 (SLVT) or 0xDA (SLVR) */
+    tx_reg[2] = i2c->i2c_addr;  /* 0xD8 (SLVT) or 0x30 (SLVR-read) */
     tx_reg[3] = reg;
     ret = br_cmd_send(i2c->bridge, 0x002B, tx_reg, 4, NULL, 0);
+    if (need_f424) {
+        uint8_t v = 0;
+        br_cmd_write_registers(i2c->bridge, 0, 0xF424, &v, 1);
+    }
     if (ret != HDTVMATE_OK) return ret;
 
     tx_reg[0] = len;

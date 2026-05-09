@@ -397,71 +397,43 @@ static inline void br_f424_end(it9300_device_t *dev) {
  * Use br_cmd_slvr_init() once, then br_cmd_slvr_write() for each reg.
  */
 /*
- * MAILBOX byte for SLVR proxy access — discovered 2026-05-09 by reading
- * Linux DVB driver source (github.com/nxdong520/avl6381 it930x.c):
+ * SLVR proxy access — CORRECTED 2026-05-09 via live Frida capture of Sony's
+ * drvi2c_cxd6801_ite_Write + IT9300_writeGenericRegisters call chain.
  *
- *   req.mbox |= ((addr & 0x80) >> 3);
+ * Earlier hypotheses (mbox=0x10, F424 wrap, 0x4900 footer) were ALL WRONG
+ * for this code path. Sony's actual SLVR writes use:
  *
- * For i2c addresses with bit 7 set (incl. 0x98 SLVR proxy), the kernel driver
- * sets bit 4 of the USB packet's "mbox" byte (= byte[1] of TX frame, which our
- * br_cmd_send treats as cmd_hi). Without this bit, bridge routes the request
- * through plain i2c bus 3 — chip's SLVR proxy isn't on that bus, so NACK 0x15.
- * With it set, bridge uses chip-internal mailbox routing — slave responds.
+ *   USB CMD = 0x002B (mbox = 0, cmd = 0x2B — no high byte set)
+ *   payload = [len, bus, addr, sub_addr, ...packet]
+ *           = [7, 0x03, 0x98, 0x0A, 0xC5, bank, reg, val, mask, 0x00]
  *
- * For 0x98: (0x98 & 0x80) >> 3 = 0x10. So we send cmd = 0x102B (mbox=0x10,
- * cmd_lo=0x2B) for SLVR writes, 0x102A for SLVR reads.
+ * Verified against captured WR_GEN trace:
+ *   "mbox=0x0 bus=0x3 addr=0x98 len=7 data=0a c5 a3 a1 77 ff 00"
  *
- * Note: SLVT (0xD8) etc. also have bit 7 set, so kernel sets mbox=0x10 for
- * them too. But chip's main slaves at 0xD8 also respond to plain bus-3 i2c
- * (mbox=0), which is why our existing SLVT writes work without this fix.
- * The mbox bit is only REQUIRED for chip-internal proxies like 0x98.
+ * The mailbox bit from avl6381's it930x.c is for the KERNEL DVB driver's
+ * internal use — Sony's userspace doesn't go through that path; it talks
+ * directly to the IT9300 firmware via libusb-style USB CMDs. mbox stays 0.
+ *
+ * No F424 wrap on the write itself (Sony's flag=0x3 skips it). No post-
+ * write notify to 0x4900 either. The only F424 wrap appears around the
+ * "set reg pointer" sub-write inside the SLVR-READ pattern (handled in
+ * the read path, not here).
  */
-#define SLVR_CMD_WR  0x102B
-#define SLVR_CMD_RD  0x102A
-
-/*
- * Post-write footer — discovered 2026-05-09 from Sony's
- * drvi2c_cxd6801_ite_Write disassembly @ 0xd9d48.
- *
- * Every i2c write performed by Sony's ITE-path wrapper is followed by
- * a 4-byte burst write to bridge register 0x4900 with payload:
- *
- *   [0xF4, bus, i2c_addr_8bit, len]
- *
- * This is the chip-side NOTIFY/COMMIT mechanism: the bridge HW logs the
- * just-completed i2c transaction here, the chip's mailbox subsystem
- * watches this register for "go process this write" pulses. Without it,
- * mbox-routed writes to chip-internal slaves (i2c=0x98) are accepted by
- * bridge but the chip never picks them up — error 0x19 / no response.
- *
- * The whole transaction is wrapped with F424 = 1 (begin) / 0 (end), so
- * the i2c repeater is held open until the footer commits.
- */
-static hdtvmate_error_t slvr_post_write_footer(it9300_device_t *dev,
-                                                uint8_t i2c_addr, uint8_t wlen)
-{
-    uint8_t footer[4] = { 0xF4, 0x03, i2c_addr, wlen };
-    /* proc=2 (selected automatically for addr > 0xFF inside br_cmd_write_registers) */
-    return br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0x4900, footer, 4);
-}
-
 hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
-    br_f424_begin(dev);
+    /* i2c=0x98 reg 0x00 = 0x01: payload = [len=2, bus=3, addr=0x98, 0x00, 0x01] */
     {
-        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
-        ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
-        if (ret != HDTVMATE_OK) { br_f424_end(dev); return ret; }
-        slvr_post_write_footer(dev, 0x98, 1);
+        uint8_t tx[] = { 2, 0x03, 0x98, 0x00, 0x01 };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
     }
+    /* i2c=0x98 reg 0x48 = 0x01 */
     {
-        uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
-        ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
-        if (ret != HDTVMATE_OK) { br_f424_end(dev); return ret; }
-        slvr_post_write_footer(dev, 0x98, 1);
+        uint8_t tx[] = { 2, 0x03, 0x98, 0x48, 0x01 };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
     }
-    br_f424_end(dev);
     return HDTVMATE_OK;
 }
 
@@ -490,41 +462,36 @@ hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
 
-    /* Step 1 — proxy re-init (mbox-routed) */
+    /* Send CMD 0xB3 query packet — Sony's exact format (live Frida-verified):
+     * payload = [len=7, bus=3, addr=0x98, 0x0A, 0xB3, 0x10, 0x00, 0x00, 0x00, 0x00] */
     {
-        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
-        ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
-        if (ret != HDTVMATE_OK) return ret;
-    }
-    {
-        uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
-        ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
-        if (ret != HDTVMATE_OK) return ret;
-    }
-
-    /* Step 2 — CMD 0xB3 query packet, written to i2c=0x98 reg 0x0A (mbox-routed) */
-    {
-        uint8_t pkt[6] = { 0xB3, 0x10, 0x00, 0x00, 0x00, 0x00 };
-        uint8_t tx[3 + 6];
-        tx[0] = 6;
-        tx[1] = 0x98;
-        tx[2] = 0x0A;
-        memcpy(&tx[3], pkt, 6);
-        ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
+        uint8_t tx[] = {
+            7, 0x03, 0x98, 0x0A,
+            0xB3, 0x10, 0x00, 0x00, 0x00, 0x00
+        };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) {
             LOG_WARN("SLVR_RD_SETUP: 0xB3 query failed: %d", ret);
             return ret;
         }
     }
 
-    /* Step 3 — read back response (mbox-routed) */
+    /* Read back response — Sony's 2-stage SLVR read pattern with F424 wrap on
+     * the pointer-set sub-write only, NOT on the bare read. */
     {
-        uint8_t set_ptr[] = { 1, 0x98, 0x0A };
-        br_cmd_send(dev, SLVR_CMD_WR, set_ptr, sizeof(set_ptr), NULL, 0);
-
-        uint8_t rd[] = { 6, 0x98 };
+        /* Stage 1: F424 = 1 */
+        br_f424_begin(dev);
+        /* Stage 2: write 1-byte = 0x0A to i2c=0x98 (set reg pointer) */
+        {
+            uint8_t set_ptr[] = { 1, 0x03, 0x98, 0x0A };
+            br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, set_ptr, sizeof(set_ptr), NULL, 0);
+        }
+        /* Stage 3: F424 = 0 */
+        br_f424_end(dev);
+        /* Stage 4: bare read 6 bytes from i2c=0x98 (pointer is 0x0A from above) */
+        uint8_t rd[] = { 6, 0x03, 0x98 };
         uint8_t resp[6] = {0};
-        ret = br_cmd_send(dev, SLVR_CMD_RD, rd, sizeof(rd), resp, sizeof(resp));
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, rd, sizeof(rd), resp, sizeof(resp));
         LOG_INFO("SLVR_RD_SETUP: 0xB3 response: %02x %02x %02x %02x %02x %02x (expect 30 00 00 00 00 b3)",
                  resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
     }
@@ -535,19 +502,21 @@ hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
 hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
                                     uint8_t reg, uint8_t val)
 {
-    /* Build 6-byte CMD 0xC5 SlaveR write packet */
-    uint8_t pkt[6] = { 0xC5, bank, reg, val, 0xFF, 0x00 };
-    /* USB framing path B: [len=6, addr=0x98, sub_addr=0x0A, ...6 packet bytes] */
-    uint8_t tx[3 + 6];
-    tx[0] = 6;
-    tx[1] = 0x98;
-    tx[2] = 0x0A;
-    memcpy(&tx[3], pkt, 6);
-    br_f424_begin(dev);
-    hdtvmate_error_t ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
-    /* Notify chip: I just wrote 6 bytes to i2c=0x98 — please process. */
-    slvr_post_write_footer(dev, 0x98, 6);
-    br_f424_end(dev);
+    /* Sony's exact USB CMD 0x2B payload (verified via Frida WR_GEN capture):
+     *   [len=7, bus=3, addr=0x98, 0x0A, 0xC5, bank, reg, val, 0xFF, 0x00]
+     *
+     * len=7 covers all 7 i2c data bytes after addr (sub_addr 0x0A + 6-byte CMD packet).
+     * mbox=0 (cmd=0x002B not 0x102B). No F424 wrap, no 0x4900 footer for SLVR writes.
+     */
+    uint8_t tx[] = {
+        7,             /* i2c data length (sub_addr + 6 packet bytes) */
+        0x03,          /* bus 3 */
+        0x98,          /* SLVR proxy i2c addr */
+        0x0A,          /* sub_addr (i2c reg pointer on the proxy slave) */
+        0xC5, bank, reg, val, 0xFF, 0x00   /* 6-byte SLVR CMD packet */
+    };
+    hdtvmate_error_t ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR,
+                                        tx, sizeof(tx), NULL, 0);
     LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
             bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
     return ret;
