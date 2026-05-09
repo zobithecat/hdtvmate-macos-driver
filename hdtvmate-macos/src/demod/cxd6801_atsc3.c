@@ -950,16 +950,6 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 
     LOG_DBG("SLtoAA1: applying ATSC 1.0 (8VSB) mode transition...");
 
-    /* Sony's demod_atsc_Tune flow: AAtoAA → Sleep → SLtoAA → ...
-     * We were skipping the Sleep step. Without sleep mode entry,
-     * chip stays in active ATSC 3.0 and doesn't accept SLVR
-     * activation. Force Sleep before applying ATSC 1.0 sequence. */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x18, 0x01);  /* sleep mode */
-    br_user_delay(10);
-
-    /* Enable chip's internal i2c repeater to enable SLVR access */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x01);
-
     /* Captured byte-for-byte from Frida hook of Sony's
      * sony_cxd6801_demod_atsc_SlaveRWriteRegister calls during
      * Sony app's ATSC 1.0 reception attempt
@@ -990,11 +980,18 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
     };
     int n = sizeof(slvr_seq) / sizeof(slvr_seq[0]);
 
-    /* SLVR i2c addr candidates. SetRegBits trace showed 0xC0 used
-     * (a1=192=0xC0) — that's likely SLVR. 0xDA passed write ACK
-     * but read returned USB seq echo (chip didn't respond), so
-     * 0xDA is wrong despite ACK. */
-    static const uint8_t slvr_addr_candidates[] = { 0xC0, 0xCC, 0xCE, 0xDA };
+    /* CRITICAL: enable chip's internal i2c repeater BEFORE SLVR writes.
+     * Without this, SLVR queries don't reach the actual SLVR slave —
+     * bridge ACKs without chip listening (returns USB seq echo).
+     * I2cRepeaterEnable disasm @ 0xe6e6c shows it writes SLVT reg 0x08 = 1.
+     */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x01);
+    br_user_delay(2);
+
+    /* SlvR i2c addr verified via DRV_CXD6801_OnBoard_initialize disasm:
+     * the 4 i2c slaves on this chip are 0xD8 (SLVT), 0xDA (SLVR),
+     * 0xC0 (?), 0xC2 (TUNER). Try 0xDA first — that's documented SLVR. */
+    static const uint8_t slvr_addr_candidates[] = { 0xDA, 0xC0, 0xCC, 0xCE };
     cxd6801_i2c_t slvr_ctx;
     int best_ok = -1;
     uint8_t best_addr = 0;
@@ -1134,43 +1131,21 @@ hdtvmate_error_t cxd6801_atsc1_check_lock(cxd6801_device_t *dev, bool *locked)
         return HDTVMATE_ERR_TUNE;
     }
 
-    /* I2cRepeaterEnable disassembly (@ 0xe6e6c) shows it writes
-     * SLVT reg 0x08 = 1/0 to enable/disable chip's internal i2c
-     * repeater that routes queries from SLVT to SLVR/tuner.
-     * Without this, SLVR queries go nowhere (USB seq echo). */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x01);  /* enable */
-
-    /* Now read lock registers via SLVR (0xDA — verified addr) */
-    extern hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev,
-        uint8_t sub_addr, uint8_t i2c_addr, const uint8_t *data, uint8_t len);
-    extern hdtvmate_error_t br_cmd_i2c_read(it9300_device_t *dev,
-        uint8_t sub_addr, uint8_t i2c_addr, uint8_t *data, uint8_t len);
+    /* Use cxd6801_i2c_read with SLVR i2c context — proper 3-step
+     * (bank select + reg ptr + read), now SLVR-aware. */
+    cxd6801_i2c_t slvr;
+    cxd6801_i2c_init(&slvr, dev->bridge, dev->i2c_demod.chip_idx,
+                     dev->slvr_addr ? dev->slvr_addr : 0xDA,
+                     dev->i2c_demod.i2c_bus);
 
     uint8_t reg_F_11 = 0, reg_9_62 = 0, reg_D_86 = 0;
     hdtvmate_error_t ret;
-    uint8_t bank_byte;
-    const uint8_t SLVR_ADDR = 0xDA;
 
-    bank_byte = 0x0F;
-    ret = br_cmd_i2c_write(dev->bridge, 0x00, SLVR_ADDR, &bank_byte, 1);
-    if (ret != HDTVMATE_OK) goto disable_repeater;
-    ret = br_cmd_i2c_read(dev->bridge, 0x11, SLVR_ADDR, &reg_F_11, 1);
-    if (ret != HDTVMATE_OK) goto disable_repeater;
-
-    bank_byte = 0x09;
-    ret = br_cmd_i2c_write(dev->bridge, 0x00, SLVR_ADDR, &bank_byte, 1);
-    if (ret != HDTVMATE_OK) goto disable_repeater;
-    ret = br_cmd_i2c_read(dev->bridge, 0x62, SLVR_ADDR, &reg_9_62, 1);
-    if (ret != HDTVMATE_OK) goto disable_repeater;
-
-    bank_byte = 0x0D;
-    ret = br_cmd_i2c_write(dev->bridge, 0x00, SLVR_ADDR, &bank_byte, 1);
-    if (ret != HDTVMATE_OK) goto disable_repeater;
-    ret = br_cmd_i2c_read(dev->bridge, 0x86, SLVR_ADDR, &reg_D_86, 1);
-
-disable_repeater:
-    /* Always disable repeater after SLVR access (matches Sony pattern) */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x00);
+    ret = cxd6801_i2c_read(&slvr, 0x0F, 0x11, &reg_F_11, 1);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_read(&slvr, 0x09, 0x62, &reg_9_62, 1);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_read(&slvr, 0x0D, 0x86, &reg_D_86, 1);
     if (ret != HDTVMATE_OK) return ret;
 
     uint8_t ts_valid     = reg_F_11 & 0x01;

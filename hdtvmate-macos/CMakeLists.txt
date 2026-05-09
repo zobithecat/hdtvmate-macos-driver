@@ -104,3 +104,4 @@ target_link_libraries(snr_monitor hdtvmate_core)
 
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
+

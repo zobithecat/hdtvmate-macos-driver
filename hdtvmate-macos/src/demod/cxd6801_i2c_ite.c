@@ -96,9 +96,13 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
     hdtvmate_error_t ret;
     uint8_t tx_reg[64];
 
-    /* Tuner access: write reg addr, then read from tuner addr+1 */
+    /* Tuner access: write reg addr, then read from tuner addr+1.
+     * SLVT (0xD8) and SLVR (0xDA) are bank-based demod slaves —
+     * route them through the bank+ptr+read path below. Only true
+     * tuners (0xC2 ASCOT3, 0xC0 second slave?) use this branch. */
     if (i2c->i2c_addr != CXD6801_I2C_ADDR_DEMOD &&
-        i2c->i2c_addr != CXD6801_I2C_ADDR_WRITE) {
+        i2c->i2c_addr != CXD6801_I2C_ADDR_WRITE &&
+        i2c->i2c_addr != 0xDA) {
         /* Write register address to tuner */
         tx_reg[0] = 1;
         tx_reg[1] = i2c->i2c_bus;
@@ -132,21 +136,21 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
      * CMD 0x2A combined (4-byte) format was tested but returned 0xFF/0x00
      * on this firmware version. Using split: write reg ptr + read.
      */
-    /* All SLVT ops via 0xD8 — CONFIRMED WORKING!
+    /* SLVT/SLVR ops via i2c->i2c_addr — works for both 0xD8 and 0xDA.
      * bank select [0x00, bank] + reg ptr [reg] + read via CMD 0x2A */
-    ret = cxd6801_i2c_select_bank(i2c, bank);  /* 0xD8 */
+    ret = cxd6801_i2c_select_bank(i2c, bank);
     if (ret != HDTVMATE_OK) return ret;
 
     tx_reg[0] = 1;
     tx_reg[1] = i2c->i2c_bus;
-    tx_reg[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
+    tx_reg[2] = i2c->i2c_addr;  /* 0xD8 (SLVT) or 0xDA (SLVR) */
     tx_reg[3] = reg;
     ret = br_cmd_send(i2c->bridge, 0x002B, tx_reg, 4, NULL, 0);
     if (ret != HDTVMATE_OK) return ret;
 
     tx_reg[0] = len;
     tx_reg[1] = i2c->i2c_bus;
-    tx_reg[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
+    tx_reg[2] = i2c->i2c_addr;
     ret = br_cmd_send(i2c->bridge, 0x002A, tx_reg, 3, data, len);
 
     LOG_DBG("I2C read: bank=0x%02x reg=0x%02x len=%d data=%02x %02x -> %s",
