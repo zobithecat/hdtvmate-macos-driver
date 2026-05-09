@@ -58,6 +58,10 @@ target_link_libraries(hdtvmate_tune hdtvmate_core)
 add_executable(hdtvmate_tune_test src/tools/tune_test.c)
 target_link_libraries(hdtvmate_tune_test hdtvmate_core)
 
+# --- CLI tool: probe SLVR i2c=0x98 across buses + alternate addrs ---
+add_executable(slvr_bus_probe src/tools/slvr_bus_probe.c)
+target_link_libraries(slvr_bus_probe hdtvmate_core)
+
 # --- CLI tool: full reset scan ---
 add_executable(hdtvmate_resetscan src/tools/full_reset_scan.c)
 target_link_libraries(hdtvmate_resetscan hdtvmate_core)
