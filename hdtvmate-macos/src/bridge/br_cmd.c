@@ -419,21 +419,47 @@ static inline void br_f424_end(it9300_device_t *dev) {
 #define SLVR_CMD_WR  0x102B
 #define SLVR_CMD_RD  0x102A
 
+/*
+ * Post-write footer — discovered 2026-05-09 from Sony's
+ * drvi2c_cxd6801_ite_Write disassembly @ 0xd9d48.
+ *
+ * Every i2c write performed by Sony's ITE-path wrapper is followed by
+ * a 4-byte burst write to bridge register 0x4900 with payload:
+ *
+ *   [0xF4, bus, i2c_addr_8bit, len]
+ *
+ * This is the chip-side NOTIFY/COMMIT mechanism: the bridge HW logs the
+ * just-completed i2c transaction here, the chip's mailbox subsystem
+ * watches this register for "go process this write" pulses. Without it,
+ * mbox-routed writes to chip-internal slaves (i2c=0x98) are accepted by
+ * bridge but the chip never picks them up — error 0x19 / no response.
+ *
+ * The whole transaction is wrapped with F424 = 1 (begin) / 0 (end), so
+ * the i2c repeater is held open until the footer commits.
+ */
+static hdtvmate_error_t slvr_post_write_footer(it9300_device_t *dev,
+                                                uint8_t i2c_addr, uint8_t wlen)
+{
+    uint8_t footer[4] = { 0xF4, 0x03, i2c_addr, wlen };
+    /* proc=2 (selected automatically for addr > 0xFF inside br_cmd_write_registers) */
+    return br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0x4900, footer, 4);
+}
+
 hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
-    /* F424 i2c-repeater wrap — chip-internal proxy may need it even though
-     * plain bus-3 i2c (SLVT) doesn't. */
     br_f424_begin(dev);
     {
         uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
         ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) { br_f424_end(dev); return ret; }
+        slvr_post_write_footer(dev, 0x98, 1);
     }
     {
         uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
         ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) { br_f424_end(dev); return ret; }
+        slvr_post_write_footer(dev, 0x98, 1);
     }
     br_f424_end(dev);
     return HDTVMATE_OK;
@@ -519,6 +545,8 @@ hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
     memcpy(&tx[3], pkt, 6);
     br_f424_begin(dev);
     hdtvmate_error_t ret = br_cmd_send(dev, SLVR_CMD_WR, tx, sizeof(tx), NULL, 0);
+    /* Notify chip: I just wrote 6 bytes to i2c=0x98 — please process. */
+    slvr_post_write_footer(dev, 0x98, 6);
     br_f424_end(dev);
     LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
             bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
