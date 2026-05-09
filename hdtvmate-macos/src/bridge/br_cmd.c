@@ -399,18 +399,94 @@ static inline void br_f424_end(it9300_device_t *dev) {
 hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
+    /* CMD 0x2B GENERIC_I2C_WR payload format: [len, bus, addr, sub_addr, ...data]
+     * (Earlier this code lacked the `bus` byte — the bridge then mis-interpreted
+     * 0x98 as the bus number, NACKing every SLVR write while logging "OK".) */
     /* i2c=0x98 reg 0x00 = 0x01 */
     {
-        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
+        uint8_t tx[] = { 1, 0x03, 0x98, 0x00, 0x01 };
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) return ret;
     }
     /* i2c=0x98 reg 0x48 = 0x01 */
     {
-        uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
+        uint8_t tx[] = { 1, 0x03, 0x98, 0x48, 0x01 };
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) return ret;
     }
+    return HDTVMATE_OK;
+}
+
+/*
+ * SLVR-read enable query — CMD 0xB3 to the SLVR proxy slave (0x98).
+ *
+ * From sony_atsc1_full_capture.log line 247-249, AFTER ASCOT3 X_tune and
+ * BEFORE SetStreamOutput / lock check:
+ *
+ *   W i2c=0x98 reg=0x0a len=6 data=b3 10 00 00 00 00      ← query
+ *   R i2c=0x98 reg=0x0a len=6      → 30 00 00 00 00 b3   ← response
+ *
+ * The response's first byte (0x30) is the chip-side i2c address for SLVR
+ * reads. Sending this query also enables/primes the chip's SLVR read path:
+ * without it, subsequent i2c=0x30 reads NACK at the chip (CMD 0x2b error
+ * code 0x15 in our trace).
+ *
+ * The 0xC4 0x40 / 0x91 / 0x5e / 0x67 / 0x68 block in Sony's trace at lines
+ * 220-240 is NOT bridge SLVR setup — that's the ASCOT3 tuner X_tune
+ * sequence (i2c=0xC0 is the tuner, not the bridge). We already do the
+ * equivalent in cxd6801_tuner_tune via ascot3_x_tune.
+ *
+ * br_cmd_slvr_init (proxy init at i2c=0x98 reg 0/48 = 1) must run first.
+ */
+hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
+{
+    hdtvmate_error_t ret;
+
+    /* Step 1 — proxy re-init: even though sltoaa1 already initialized
+     * the proxy, Sony re-initializes it here before the 0xB3 query
+     * (capture lines 243-246). */
+    {
+        uint8_t tx[] = { 1, 0x03, 0x98, 0x00, 0x01 };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+    {
+        uint8_t tx[] = { 1, 0x03, 0x98, 0x48, 0x01 };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+
+    /* Step 2 — CMD 0xB3 query packet, written to i2c=0x98 reg 0x0A. */
+    {
+        uint8_t pkt[6] = { 0xB3, 0x10, 0x00, 0x00, 0x00, 0x00 };
+        uint8_t tx[4 + 6];
+        tx[0] = 6;
+        tx[1] = 0x03;
+        tx[2] = 0x98;
+        tx[3] = 0x0A;
+        memcpy(&tx[4], pkt, 6);
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) {
+            LOG_WARN("SLVR_RD_SETUP: 0xB3 query failed: %d", ret);
+            return ret;
+        }
+    }
+
+    /* Step 3 — read back response. We need to set the chip's reg pointer
+     * to 0x0A first (write addr+sub), then issue read. Use the standard
+     * 2-stage pattern from cxd6801_i2c_read. */
+    {
+        /* Set reg pointer: write [bus, 0x98, 0x0A] with no data */
+        uint8_t set_ptr[] = { 1, 0x03, 0x98, 0x0A };
+        br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, set_ptr, sizeof(set_ptr), NULL, 0);
+
+        uint8_t rd[] = { 6, 0x03, 0x98 };
+        uint8_t resp[6] = {0};
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, rd, sizeof(rd), resp, sizeof(resp));
+        LOG_INFO("SLVR_RD_SETUP: 0xB3 response: %02x %02x %02x %02x %02x %02x (expect 30 00 00 00 00 b3)",
+                 resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
+    }
+
     return HDTVMATE_OK;
 }
 
@@ -419,17 +495,16 @@ hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
 {
     /* Build 6-byte CMD 0xC5 SlaveR write packet */
     uint8_t pkt[6] = { 0xC5, bank, reg, val, 0xFF, 0x00 };
-    /* Send to i2c=0x98 reg 0x0A */
-    uint8_t tx[3 + 6];
-    tx[0] = 6;       /* data len */
-    tx[1] = 0x98;    /* i2c addr */
-    tx[2] = 0x0A;    /* sub_addr (reg 0x0A on proxy slave) */
-    memcpy(&tx[3], pkt, 6);
+    /* USB framing: [len=6, bus, addr=0x98, sub_addr=0x0A, ...6 packet bytes] */
+    uint8_t tx[4 + 6];
+    tx[0] = 6;
+    tx[1] = 0x03;
+    tx[2] = 0x98;
+    tx[3] = 0x0A;
+    memcpy(&tx[4], pkt, 6);
     hdtvmate_error_t ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
     LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
             bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
-    /* Sony reads back from 0x98 reg 0x0A after each write — we'll skip
-     * the read for now since the value isn't used for control flow. */
     return ret;
 }
 

@@ -946,6 +946,7 @@ hdtvmate_error_t cxd6801_atsc3_sleep(cxd6801_device_t *dev)
  */
 /* External: br_cmd helpers for SLVR proxy via i2c=0x98 + CMD 0xC5 */
 extern hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev);
+extern hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev);
 extern hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
                                            uint8_t reg, uint8_t val);
 
@@ -1104,6 +1105,14 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
     if (ret != HDTVMATE_OK) {
         LOG_ERR("Tuner tune failed");
         return ret;
+    }
+
+    /* Bridge SLVR-read routing setup — Sony emits this between Tune end and
+     * SetStreamOutput. Without it, i2c=0x30 reads NACK at the chip. */
+    ret = br_cmd_slvr_read_setup(dev->bridge);
+    if (ret != HDTVMATE_OK) {
+        LOG_WARN("SLVR read setup failed (chip may NACK on i2c=0x30 reads): %d", ret);
+        /* Non-fatal — continue, lock check will surface the failure */
     }
 
     /* SetStreamOutput sequence — captured from sony_atsc1_full_capture.log:
