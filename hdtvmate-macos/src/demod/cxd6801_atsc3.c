@@ -950,6 +950,16 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 
     LOG_DBG("SLtoAA1: applying ATSC 1.0 (8VSB) mode transition...");
 
+    /* Sony's demod_atsc_Tune flow: AAtoAA → Sleep → SLtoAA → ...
+     * We were skipping the Sleep step. Without sleep mode entry,
+     * chip stays in active ATSC 3.0 and doesn't accept SLVR
+     * activation. Force Sleep before applying ATSC 1.0 sequence. */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x18, 0x01);  /* sleep mode */
+    br_user_delay(10);
+
+    /* Enable chip's internal i2c repeater to enable SLVR access */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x01);
+
     /* Captured byte-for-byte from Frida hook of Sony's
      * sony_cxd6801_demod_atsc_SlaveRWriteRegister calls during
      * Sony app's ATSC 1.0 reception attempt
