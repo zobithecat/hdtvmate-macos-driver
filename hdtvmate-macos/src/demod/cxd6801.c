@@ -250,16 +250,29 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         return ret;
     }
 
-    /* ATECC SLVR-unlock handshake — Sony runs it AFTER tuner init.
-     * Tuner init's final writes (reg 0x87=0xC0, 0x88=0x00) prime the
-     * bridge i2c master to route to ATECC slave at 0xC8. Without these
-     * tuner writes preceding ATECC, the chip's mailbox doesn't unlock. */
+    /* ATECC chip-presence check (NOT unlock — verified via Frida that
+     * this is checkChipStatus() probing). Run for parity with Sony. */
     {
         hdtvmate_error_t atecc_ret = cxd6801_atecc_unlock_slvr(dev);
         if (atecc_ret != HDTVMATE_OK) {
-            LOG_WARN("ATECC unlock failed: %d (SLVR may stay locked)", atecc_ret);
+            LOG_WARN("ATECC chip-status check failed: %d", atecc_ret);
         }
     }
+
+    /* Sony's TAIL of chip-init — captured byte-exact from live Frida:
+     *   SLVT bank 0 reg 0xC4 = 0xA9  ← unknown chip-feature byte
+     *   SLVT bank 2 reg 0xE4 = 0x00  ← clear something in bank 2
+     *   SLVT bank 0 reg 0xC4 = 0xA1  ← back to "default" 0xA1
+     *
+     * These three writes bracket the tuner init + ATECC handshake in
+     * Sony's chip-init flow. They are likely the actual SLVR-enable
+     * trigger — chip's secondary demod state machine sees the C4=A9 →
+     * (work happens) → C4=A1 transition and unlocks SLVR.
+     *
+     * (Without these, our chip ACKs ATECC commands but keeps SLVR locked.) */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA9);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xE4, 0x00);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA1);
 
     LOG_INFO("CXD6801 initialized successfully (state: SLEEP)");
     return HDTVMATE_OK;
