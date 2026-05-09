@@ -120,9 +120,7 @@ int main(void)
         printf("ret=%d\n", ret);
     }
 
-    /* mbox=0x10 + sweep bus byte (with bus byte format). Maybe SLVR is on
-     * bus 2 (where avl6381 init sets I2C_SPEED_366K via reg 0xf6a7) and
-     * bus byte = 2 would route correctly. */
+    /* mbox=0x10 + sweep bus byte (with bus byte format). */
     printf("\n=== mbox=0x10 + bus byte sweep for i2c=0x98 (with bus byte) ===\n");
     for (uint8_t bus = 0; bus < 4; bus++) {
         printf("[mbox=0x10 bus=%d] i2c=0x98 reg=0x00 = 0x01: ", bus);
@@ -130,6 +128,79 @@ int main(void)
         uint8_t tx[] = { 1, bus, 0x98, 0x00, 0x01 };
         ret = br_cmd_send(&bridge, 0x102B, tx, sizeof(tx), NULL, 0);
         printf("ret=%d\n", ret);
+    }
+
+    /* SLVR proxy READ via mbox=0x10. May behave differently from write. */
+    printf("\n=== SLVR READ via mbox=0x10 ===\n");
+    {
+        uint8_t resp[8] = {0};
+        uint8_t tx[] = { 6, 0x98 };
+        printf("[mbox=0x10 RD len=6 from i2c=0x98]: ");
+        fflush(stdout);
+        ret = br_cmd_send(&bridge, 0x102A, tx, sizeof(tx), resp, 6);
+        printf("ret=%d data=%02x %02x %02x %02x %02x %02x\n",
+               ret, resp[0], resp[1], resp[2], resp[3], resp[4], resp[5]);
+    }
+    {
+        uint8_t resp[8] = {0};
+        uint8_t tx[] = { 1, 0x98 };
+        printf("[mbox=0x10 RD len=1 from i2c=0x98]: ");
+        fflush(stdout);
+        ret = br_cmd_send(&bridge, 0x102A, tx, sizeof(tx), resp, 1);
+        printf("ret=%d data=%02x\n", ret, resp[0]);
+    }
+    /* Try reading from i2c=0x30 with mbox=0 (since bit 7 is 0 in 0x30) */
+    printf("\n=== i2c=0x30 reads via mbox=0 (bit 7 unset) ===\n");
+    {
+        uint8_t resp[2] = {0};
+        uint8_t set_ptr[] = { 1, 3, 0x30, 0x11 };
+        br_cmd_send(&bridge, 0x002B, set_ptr, sizeof(set_ptr), NULL, 0);
+        uint8_t rd[] = { 1, 3, 0x30 };
+        ret = br_cmd_send(&bridge, 0x002A, rd, sizeof(rd), resp, 1);
+        printf("[mbox=0 read i2c=0x30 reg 0x11]: ret=%d data=0x%02x\n", ret, resp[0]);
+    }
+    /* Maybe i2c=0x30 also needs mbox=0x10 (it's chip-internal too?) */
+    {
+        uint8_t resp[2] = {0};
+        uint8_t set_ptr[] = { 1, 3, 0x30, 0x11 };
+        br_cmd_send(&bridge, 0x102B, set_ptr, sizeof(set_ptr), NULL, 0);
+        uint8_t rd[] = { 1, 3, 0x30 };
+        ret = br_cmd_send(&bridge, 0x102A, rd, sizeof(rd), resp, 1);
+        printf("[mbox=0x10 read i2c=0x30 reg 0x11]: ret=%d data=0x%02x\n", ret, resp[0]);
+    }
+
+    /* SLVR write via i2c=0x30 (NOT 0x98) with mbox=0x10 — same path as read. */
+    printf("\n=== SLVR write via i2c=0x30 + mbox=0x10 ===\n");
+    {
+        /* Try writing reg 0x00 = 0x01 to 0x30 */
+        uint8_t tx[] = { 1, 3, 0x30, 0x00, 0x01 };
+        ret = br_cmd_send(&bridge, 0x102B, tx, sizeof(tx), NULL, 0);
+        printf("[mbox=0x10 write i2c=0x30 reg 0x00 = 0x01]: ret=%d\n", ret);
+    }
+    /* Try the 6-byte CMD 0xC5 packet to 0x30 (same payload as our SLVR_W) */
+    {
+        uint8_t tx[] = { 6, 3, 0x30, 0x0A, 0xC5, 0xA3, 0xA1, 0x77, 0xFF, 0x00 };
+        ret = br_cmd_send(&bridge, 0x102B, tx, sizeof(tx), NULL, 0);
+        printf("[mbox=0x10 write i2c=0x30 reg 0x0A 6-byte CMD packet]: ret=%d\n", ret);
+    }
+    /* Same-reg-twice test: real chip data → same value both reads.
+     * Bridge seq echo → values differ by some increment. */
+    printf("\n=== Same-reg-twice verification (real chip vs seq echo) ===\n");
+    {
+        uint8_t v1=0, v2=0, v3=0;
+        uint8_t bk[] = { 1, 3, 0x30, 0x00, 0x0F };
+        br_cmd_send(&bridge, 0x102B, bk, sizeof(bk), NULL, 0);
+        uint8_t set_ptr[] = { 1, 3, 0x30, 0x11 };
+        uint8_t rd[] = { 1, 3, 0x30 };
+
+        br_cmd_send(&bridge, 0x102B, set_ptr, sizeof(set_ptr), NULL, 0);
+        br_cmd_send(&bridge, 0x102A, rd, sizeof(rd), &v1, 1);
+        br_cmd_send(&bridge, 0x102B, set_ptr, sizeof(set_ptr), NULL, 0);
+        br_cmd_send(&bridge, 0x102A, rd, sizeof(rd), &v2, 1);
+        br_cmd_send(&bridge, 0x102B, set_ptr, sizeof(set_ptr), NULL, 0);
+        br_cmd_send(&bridge, 0x102A, rd, sizeof(rd), &v3, 1);
+        printf("[mbox=0x10 read bank=0xF reg=0x11 x3]: %02x %02x %02x %s\n",
+               v1, v2, v3, (v1==v2 && v2==v3) ? "SAME (real chip)" : "DIFFERENT (seq echo)");
     }
 
     cxd6801_deinit(&demod);
