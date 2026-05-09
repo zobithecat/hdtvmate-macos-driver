@@ -67,18 +67,19 @@ static hdtvmate_error_t i2c_raw_read(cxd6801_i2c_t *i2c, uint8_t *data, uint8_t 
 }
 
 /*
- * Select register bank
- * CXD6801: ALL operations (bank select, reg set, read) go through READ addr (0xDC)
- * Confirmed by testing: using 0xDC for write+read gives correct data!
+ * Select register bank on the i2c context's slave.
+ *
+ * SLVT (0xD8) and SLVR (0x30 — read-side, see atsc1 lock check) are both
+ * bank-based: bank state is per-slave, so we must select bank on the
+ * SAME slave we'll then read from. (Earlier this hardcoded SLVT, which
+ * meant any non-SLVT context would bank-select on the wrong slave.)
  */
 static hdtvmate_error_t cxd6801_i2c_select_bank(cxd6801_i2c_t *i2c, uint8_t bank)
 {
-    /* Bank select: write [0x00, bank] to SLVT addr (0xD8).
-     * CONFIRMED: 0xD8 bank select + 0xD8 write + 0xD8 read ALL work! */
     uint8_t tx[8];
     tx[0] = 2;
     tx[1] = i2c->i2c_bus;
-    tx[2] = CXD6801_I2C_ADDR_SLVT;  /* 0xD8 */
+    tx[2] = i2c->i2c_addr;  /* 0xD8 (SLVT) or 0x30 (SLVR-read) */
     tx[3] = 0x00;
     tx[4] = bank;
     return br_cmd_send(i2c->bridge, 0x002B, tx, 5, NULL, 0);
@@ -97,12 +98,18 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
     uint8_t tx_reg[64];
 
     /* Tuner access: write reg addr, then read from tuner addr+1.
-     * SLVT (0xD8), SLVR (0xC0 or 0xDA — depending on chip variant)
-     * are bank-based demod slaves — route through 3-step path. */
+     * SLVT (0xD8) and SLVR-read (0x30) are bank-based demod slaves —
+     * route through 3-step path. (0xDA/0xC0 kept from earlier wrong
+     * SLVR guesses, harmless.)
+     *
+     * Asymmetric SLVR i2c map (verified via Sony Frida capture):
+     *   writes go via PROXY 0x98 + CMD 0xC5 packets (br_cmd_slvr_write)
+     *   reads go directly to 0x30 with normal bank-select 3-step pattern */
     if (i2c->i2c_addr != CXD6801_I2C_ADDR_DEMOD &&
         i2c->i2c_addr != CXD6801_I2C_ADDR_WRITE &&
         i2c->i2c_addr != 0xDA &&
-        i2c->i2c_addr != 0xC0) {
+        i2c->i2c_addr != 0xC0 &&
+        i2c->i2c_addr != 0x30) {
         /* Write register address to tuner */
         tx_reg[0] = 1;
         tx_reg[1] = i2c->i2c_bus;

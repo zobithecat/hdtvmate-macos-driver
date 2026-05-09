@@ -1090,6 +1090,12 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         return ret;
     }
 
+    /* SLVR is asymmetric on this chip (verified via Sony Frida capture):
+     *   writes via PROXY i2c=0x98 + CMD 0xC5 packets (br_cmd_slvr_write)
+     *   reads directly at i2c=0x30 with normal bank-select 3-step pattern
+     * Lock check (atsc_monitor_SyncStat) reads SLVR via 0x30. */
+    dev->slvr_addr = 0x30;
+
     /* Set state so tuner_tune picks ATSC1 g_param_table entry [9] */
     dev->state = CXD6801_STATE_ACTIVE_ATSC1;
 
@@ -1135,29 +1141,21 @@ hdtvmate_error_t cxd6801_atsc1_check_lock(cxd6801_device_t *dev, bool *locked)
      *   else if (out2 != 0 && [+0x2a7] != 0) → check out3 → partial
      *   else                         → locked (lock=1)
      *
-     * Reads from SLVR (0xDA), not SLVT (0xD8).
-     *
-     * TEMPORARY: SLVR is now via 0x98 proxy (CMD 0xC5 packet) — read
-     * format unknown yet. Force lock=true to allow streaming attempt
-     * and see if chip outputs TS data on EP 0x84. */
-    *locked = true;
-    return HDTVMATE_OK;
-}
-
-static hdtvmate_error_t cxd6801_atsc1_check_lock_real(cxd6801_device_t *dev, bool *locked)
-{
+     * SLVR i2c is asymmetric: writes via 0x98 proxy + CMD 0xC5; reads
+     * direct at i2c=0x30 with bank-select 3-step. Confirmed in Sony's
+     * own capture (sony_atsc1_full_capture.log lines 260-294: same
+     * three reads at i2c=0x30, returning F.11=0x00 / 9.62=0x51 / D.86=0x00
+     * for an unlocked channel). */
     *locked = false;
 
     if (!dev->slvr_addr) {
+        LOG_WARN("ATSC 1.0 lock check: slvr_addr unset (called before tune?)");
         return HDTVMATE_ERR_TUNE;
     }
 
-    /* Use cxd6801_i2c_read with SLVR i2c context — proper 3-step
-     * (bank select + reg ptr + read), now SLVR-aware. */
     cxd6801_i2c_t slvr;
     cxd6801_i2c_init(&slvr, dev->bridge, dev->i2c_demod.chip_idx,
-                     dev->slvr_addr ? dev->slvr_addr : 0xDA,
-                     dev->i2c_demod.i2c_bus);
+                     dev->slvr_addr, dev->i2c_demod.i2c_bus);
 
     uint8_t reg_F_11 = 0, reg_9_62 = 0, reg_D_86 = 0;
     hdtvmate_error_t ret;
@@ -1169,14 +1167,14 @@ static hdtvmate_error_t cxd6801_atsc1_check_lock_real(cxd6801_device_t *dev, boo
     ret = cxd6801_i2c_read(&slvr, 0x0D, 0x86, &reg_D_86, 1);
     if (ret != HDTVMATE_OK) return ret;
 
-    uint8_t ts_valid     = reg_F_11 & 0x01;
-    uint8_t unlock_det   = (reg_9_62 >> 4) & 0x01;
-    uint8_t ts_lock      = reg_D_86 & 0x01;
+    uint8_t ts_valid   = reg_F_11 & 0x01;
+    uint8_t unlock_det = (reg_9_62 >> 4) & 0x01;
+    uint8_t ts_lock    = reg_D_86 & 0x01;
 
     LOG_DBG("ATSC 1.0 lock: F.11=0x%02x (valid=%d) 9.62=0x%02x (unlock=%d) D.86=0x%02x (lock=%d)",
             reg_F_11, ts_valid, reg_9_62, unlock_det, reg_D_86, ts_lock);
 
-    /* Locked = no unlock detected + ts_lock asserted */
+    /* CheckTSLock: locked iff no unlock-detect and ts_lock asserted */
     *locked = (unlock_det == 0) && (ts_lock != 0);
     return HDTVMATE_OK;
 }

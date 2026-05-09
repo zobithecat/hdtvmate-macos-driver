@@ -117,7 +117,8 @@ typedef struct {
     cxd6801_plp_config_t plp_config;
     bool             initialized;
     bool             tuner_initialized;
-    uint8_t          slvr_addr;          /* SlvR i2c addr (0xDA), set by SLtoAA1 */
+    uint8_t          slvr_addr;          /* SLVR read i2c addr (0x30 on ATSC 1.0 path), set by atsc1_tune.
+                                            Asymmetric: writes via 0x98 proxy (br_cmd_slvr_write), reads direct at 0x30. */
 } cxd6801_device_t;
 
 /* --- I2C over IT9300 --- */
