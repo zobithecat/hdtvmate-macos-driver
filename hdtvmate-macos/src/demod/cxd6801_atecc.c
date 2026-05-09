@@ -181,9 +181,38 @@ hdtvmate_error_t cxd6801_atecc_unlock_slvr(cxd6801_device_t *dev)
         uint8_t cmd[5] = { 0x07, 0x02, 0x80, 0x00, 0x00 };
         ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, EXEC_DELAY);
         if (ret != HDTVMATE_OK) { LOG_WARN("ATECC Read failed: %d", ret); return ret; }
-        LOG_DBG("ATECC config: %02x %02x %02x %02x %02x %02x %02x %02x",
-                resp[0], resp[1], resp[2], resp[3],
-                resp[4], resp[5], resp[6], resp[7]);
+        LOG_DBG("ATECC config[0..31]: %02x %02x %02x %02x %02x %02x %02x %02x"
+                " %02x %02x %02x %02x %02x %02x %02x %02x"
+                " %02x %02x %02x %02x %02x %02x %02x %02x"
+                " %02x %02x %02x %02x %02x %02x %02x %02x",
+                resp[0],resp[1],resp[2],resp[3],resp[4],resp[5],resp[6],resp[7],
+                resp[8],resp[9],resp[10],resp[11],resp[12],resp[13],resp[14],resp[15],
+                resp[16],resp[17],resp[18],resp[19],resp[20],resp[21],resp[22],resp[23],
+                resp[24],resp[25],resp[26],resp[27],resp[28],resp[29],resp[30],resp[31]);
+    }
+
+    /* === Step 5+: Read remaining 96 bytes of config zone (offsets 32-127) ===
+     * Config zone is 128 bytes total. 4 reads of 32B each. Reveals slot
+     * configuration including SlotLocked / SlotConfig / KeyConfig. */
+    for (uint16_t off = 8; off < 32; off += 8) {  /* offset is in 4-byte words */
+        uint8_t cmd[5] = {
+            0x07, 0x02, 0x80,         /* Read, mode=config|32B */
+            (uint8_t)(off & 0xFF),    /* word offset low */
+            (uint8_t)((off >> 8) & 0xFF)
+        };
+        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, EXEC_DELAY);
+        if (ret != HDTVMATE_OK) {
+            LOG_WARN("ATECC Read off=%u failed: %d", off, ret); break;
+        }
+        LOG_DBG("ATECC config[%u..%u]: %02x %02x %02x %02x %02x %02x %02x %02x"
+                " %02x %02x %02x %02x %02x %02x %02x %02x"
+                " %02x %02x %02x %02x %02x %02x %02x %02x"
+                " %02x %02x %02x %02x %02x %02x %02x %02x",
+                off*4, off*4+31,
+                resp[0],resp[1],resp[2],resp[3],resp[4],resp[5],resp[6],resp[7],
+                resp[8],resp[9],resp[10],resp[11],resp[12],resp[13],resp[14],resp[15],
+                resp[16],resp[17],resp[18],resp[19],resp[20],resp[21],resp[22],resp[23],
+                resp[24],resp[25],resp[26],resp[27],resp[28],resp[29],resp[30],resp[31]);
     }
 
     LOG_INFO("ATECC: SLVR unlock handshake complete");
