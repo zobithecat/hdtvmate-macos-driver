@@ -378,6 +378,61 @@ static inline void br_f424_end(it9300_device_t *dev) {
     br_cmd_write_registers(dev, IT9300_PROCESSOR_LINK, 0xF424, &v, 1);
 }
 
+/*
+ * SLVR (auxiliary slave) write via 0x98 PROXY slave + CMD 0xC5 packet.
+ *
+ * Captured byte-level via Frida (sony_atsc1_full_capture.log):
+ *   The Sony chip's SLVR isn't accessed directly — it's reached via
+ *   a "proxy" slave at i2c=0x98, by writing 6-byte CMD packets to
+ *   register 0x0A:
+ *
+ *     [0xC5, bank, reg, val, 0xFF, 0x00]
+ *
+ *   0xC5 is the SlaveR write command opcode.
+ *
+ * Before the first SLVR write in a session, the proxy slave needs:
+ *     i2c=0x98 reg 0x00 = 0x01
+ *     i2c=0x98 reg 0x48 = 0x01
+ *
+ * Use br_cmd_slvr_init() once, then br_cmd_slvr_write() for each reg.
+ */
+hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev)
+{
+    hdtvmate_error_t ret;
+    /* i2c=0x98 reg 0x00 = 0x01 */
+    {
+        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+    /* i2c=0x98 reg 0x48 = 0x01 */
+    {
+        uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
+        ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        if (ret != HDTVMATE_OK) return ret;
+    }
+    return HDTVMATE_OK;
+}
+
+hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
+                                    uint8_t reg, uint8_t val)
+{
+    /* Build 6-byte CMD 0xC5 SlaveR write packet */
+    uint8_t pkt[6] = { 0xC5, bank, reg, val, 0xFF, 0x00 };
+    /* Send to i2c=0x98 reg 0x0A */
+    uint8_t tx[3 + 6];
+    tx[0] = 6;       /* data len */
+    tx[1] = 0x98;    /* i2c addr */
+    tx[2] = 0x0A;    /* sub_addr (reg 0x0A on proxy slave) */
+    memcpy(&tx[3], pkt, 6);
+    hdtvmate_error_t ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+    LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
+            bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
+    /* Sony reads back from 0x98 reg 0x0A after each write — we'll skip
+     * the read for now since the value isn't used for control flow. */
+    return ret;
+}
+
 hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
                                    uint8_t i2c_addr, const uint8_t *data, uint8_t len)
 {

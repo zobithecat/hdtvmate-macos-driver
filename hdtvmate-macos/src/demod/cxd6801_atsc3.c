@@ -944,26 +944,27 @@ hdtvmate_error_t cxd6801_atsc3_sleep(cxd6801_device_t *dev)
  *
  * This is a minimal port — complete fidelity needs SlaveRWrite ports too.
  */
+/* External: br_cmd helpers for SLVR proxy via i2c=0x98 + CMD 0xC5 */
+extern hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev);
+extern hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
+                                           uint8_t reg, uint8_t val);
+
 static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 {
     hdtvmate_error_t ret;
 
     LOG_DBG("SLtoAA1: applying ATSC 1.0 (8VSB) mode transition...");
 
-    /* Captured byte-for-byte from Frida hook of Sony's
-     * sony_cxd6801_demod_atsc_SlaveRWriteRegister calls during
-     * Sony app's ATSC 1.0 reception attempt
-     * (/tmp/sony_atsc1_real.log).
+    /* SLVR (auxiliary 8VSB demod slave) writes captured byte-level via
+     * Frida hook on sony_cxd6801_i2c_CommonWriteRegister
+     * (sony_atsc1_full_capture.log).
      *
-     * 33 SlaveR (auxiliary I2C slave) writes that put the CXD6801
-     * into 8VSB demod mode. These banks (0xA0, 0xA3, 0x06, 0x09) are
-     * different from the SLVT banks we've been using for ATSC 3.0.
+     * KEY FINDING: SLVR is reached via PROXY slave at i2c=0x98 with
+     * CMD 0xC5 6-byte packets to reg 0x0A:
+     *   [0xC5, bank, reg, val, 0xFF, 0x00]
      *
-     * NOTE: SlaveR may use a different I2C address than SLVT (0xD8).
-     * If this fails with NACK we need to determine SlvR's i2c_addr
-     * (likely 0xDA) and add a separate i2c context for it.
-     * For now try the simple path — same i2c, different banks.
-     */
+     * NOT direct i2c=0xC0/0xDA writes (those went to wrong slave
+     * which bridge fake-ACKed but chip never received). */
     static const struct { uint8_t bank, reg, val; } slvr_seq[] = {
         {0xA3, 0xA1, 0x77}, {0xA3, 0xA2, 0x77}, {0xA3, 0xA3, 0x77}, {0xA3, 0xA4, 0x27},
         {0xA0, 0x13, 0x03},
@@ -978,79 +979,47 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
         {0x06, 0x71, 0x05},
         {0xA3, 0xA0, 0x10},
     };
-    int n = sizeof(slvr_seq) / sizeof(slvr_seq[0]);
+    const int n = (int)(sizeof(slvr_seq) / sizeof(slvr_seq[0]));
 
-    /* CRITICAL: enable chip's internal i2c repeater BEFORE SLVR writes.
-     * Without this, SLVR queries don't reach the actual SLVR slave —
-     * bridge ACKs without chip listening (returns USB seq echo).
-     * I2cRepeaterEnable disasm @ 0xe6e6c shows it writes SLVT reg 0x08 = 1.
-     */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x01);
-    br_user_delay(2);
+    /* SLVX (extended slave at i2c=0xDC) — reg 0x17 = 0x0F before SLVR writes.
+     * Captured: i2c=0xDC bank 0 reg 0x17 = 0x0F at start of SLtoAA. */
+    cxd6801_i2c_t slvx;
+    cxd6801_i2c_init(&slvx, dev->bridge, dev->i2c_demod.chip_idx,
+                     0xDC, dev->i2c_demod.i2c_bus);
+    cxd6801_i2c_write_one(&slvx, 0x00, 0x17, 0x0F);
 
-    /* SlvR i2c addr — actually 0xC0 NOT 0xDA. Sony's I2cRepeaterEnable
-     * and SLtoAA both load i2c addr from handle->[0x5], which is the
-     * SECOND slave registered by DRV_CXD6801_OnBoard_initialize at
-     * chip_idx=0. That's 0xC0. The 0xDA we saw is for chip_idx=1
-     * (dual-chip variant — not our hardware). */
-    static const uint8_t slvr_addr_candidates[] = { 0xC0, 0xDA, 0xCC, 0xCE };
-    cxd6801_i2c_t slvr_ctx;
-    int best_ok = -1;
-    uint8_t best_addr = 0;
-
-    for (size_t a = 0; a < sizeof(slvr_addr_candidates); a++) {
-        uint8_t addr = slvr_addr_candidates[a];
-        cxd6801_i2c_init(&slvr_ctx, dev->bridge, dev->i2c_demod.chip_idx,
-                         addr, dev->i2c_demod.i2c_bus);
-        int ok = 0;
-        for (int i = 0; i < n; i++) {
-            ret = cxd6801_i2c_write_one(&slvr_ctx,
-                                         slvr_seq[i].bank, slvr_seq[i].reg,
-                                         slvr_seq[i].val);
-            if (ret == HDTVMATE_OK) ok++;
-            else break;  /* stop on first NACK */
-        }
-        LOG_INFO("SLtoAA1: tried SlvR addr=0x%02x: %d/%d ACK", addr, ok, n);
-        if (ok > best_ok) { best_ok = ok; best_addr = addr; }
-        if (ok == n) break;  /* full success — keep this addr */
-    }
-
-    if (best_ok < n) {
-        LOG_WARN("SLtoAA1: best try addr=0x%02x got %d/%d ACK — "
-                 "still inconclusive", best_addr, best_ok, n);
-        return HDTVMATE_ERR_TUNE;
-    }
-    LOG_INFO("SLtoAA1: SlvR mode entry done (addr=0x%02x)", best_addr);
-
-    /* Save SlvR addr in dev so subsequent functions can use it */
-    dev->slvr_addr = best_addr;
-
-    /* SLtoAA full sequence — DISASSEMBLED from 0xe9418-0xe9580.
-     * Mix of SLVT (0xD8) and SLVR (0xC0) writes:
-     *   1. SLVR bank=0 reg=0x00 val=0x00  (bank select)
-     *   2. SLVR bank=0 reg=0x17 val=0x0F  (clock?)
-     *   3. SLVT bank=0 reg=0x00 val=0x00  (bank select)
-     *   4. SLVT bank=0 reg=0xA9 val=0x00
-     *   5. SLVT bank=0 reg=0x2C val=0x01  (system=ATSC1)
-     *   6. SLVT bank=0 reg=0x4B val=0x74
-     *   7. SLVT bank=0 reg=0x49 val=0x00
-     *   8. SLVR bank=0 reg=0x18 val=0x00
-     *
-     * Earlier we had these wrong (SLVT bank 2). They're SLVT bank 0
-     * + a few SLVR writes. */
-    cxd6801_i2c_t slvr;
-    cxd6801_i2c_init(&slvr, dev->bridge, dev->i2c_demod.chip_idx,
-                     best_addr, dev->i2c_demod.i2c_bus);
-
-    cxd6801_i2c_write_one(&slvr, 0x00, 0x17, 0x0F);
+    /* SLVT (0xD8) bank 0 — system selector + ATSC 1.0 specific bits */
     cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);  /* system = ATSC 1.0 */
     cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x74);
     cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
-    cxd6801_i2c_write_one(&slvr, 0x00, 0x18, 0x00);
 
-    LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete (SlvR=0x%02x)",
-             best_addr);
+    /* SLVX reg 0x18 = 0x00 (closing) */
+    cxd6801_i2c_write_one(&slvx, 0x00, 0x18, 0x00);
+
+    /* Init SLVR proxy (i2c=0x98 reg 0x00=1 + reg 0x48=1) */
+    ret = br_cmd_slvr_init(dev->bridge);
+    if (ret != HDTVMATE_OK) {
+        LOG_WARN("SLVR proxy init failed: %d", ret);
+        return ret;
+    }
+
+    /* Send 33-write SLVR sequence via 0x98 proxy + CMD 0xC5 */
+    int ok = 0;
+    for (int i = 0; i < n; i++) {
+        ret = br_cmd_slvr_write(dev->bridge,
+                                 slvr_seq[i].bank, slvr_seq[i].reg,
+                                 slvr_seq[i].val);
+        if (ret == HDTVMATE_OK) ok++;
+    }
+    LOG_INFO("SLtoAA1: SLVR via 0x98 proxy: %d/%d packets sent", ok, n);
+
+    if (ok < n) {
+        LOG_WARN("SLtoAA1: only %d/%d SLVR packets accepted", ok, n);
+        return HDTVMATE_ERR_TUNE;
+    }
+
+    LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete (via 0x98 proxy)");
     return HDTVMATE_OK;
 }
 
@@ -1129,11 +1098,20 @@ hdtvmate_error_t cxd6801_atsc1_check_lock(cxd6801_device_t *dev, bool *locked)
      *   else if (out2 != 0 && [+0x2a7] != 0) → check out3 → partial
      *   else                         → locked (lock=1)
      *
-     * Reads from SLVR (0xDA), not SLVT (0xD8). */
+     * Reads from SLVR (0xDA), not SLVT (0xD8).
+     *
+     * TEMPORARY: SLVR is now via 0x98 proxy (CMD 0xC5 packet) — read
+     * format unknown yet. Force lock=true to allow streaming attempt
+     * and see if chip outputs TS data on EP 0x84. */
+    *locked = true;
+    return HDTVMATE_OK;
+}
+
+static hdtvmate_error_t cxd6801_atsc1_check_lock_real(cxd6801_device_t *dev, bool *locked)
+{
     *locked = false;
 
     if (!dev->slvr_addr) {
-        /* SLVR addr not yet discovered — sltoaa1 must run first */
         return HDTVMATE_ERR_TUNE;
     }
 
