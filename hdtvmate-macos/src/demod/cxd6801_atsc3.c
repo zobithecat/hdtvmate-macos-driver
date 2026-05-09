@@ -956,9 +956,58 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 
     LOG_DBG("SLtoAA1: applying ATSC 1.0 (8VSB) mode transition...");
 
-    /* === Phase 1: SetTSClockModeAndFreq SLVT sequence (mode 5 = ATSC 1.0)
-     * Captured byte-exact from sony_atsc1_full_capture.log.
-     * All writes to SLVT (0xD8). Multiple bank switches. */
+    cxd6801_i2c_t slvx;
+    cxd6801_i2c_init(&slvx, dev->bridge, dev->i2c_demod.chip_idx,
+                     0xDC, dev->i2c_demod.i2c_bus);
+
+    /* === Phase 0: SetStreamOutput — Sony's atsc_Tune calls this FIRST
+     * (sony_atsc1_long.log line 1717). Read SLVT 0xA9 (RMW), then SLVT
+     * 0xC3 = 0x01 to enable TS output. Without this prep, Sony does not
+     * proceed to lock — verified live capture order. */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);  /* bank 0 */
+    {
+        uint8_t a9_val;
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
+        (void)a9_val;
+    }
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);  /* bank 0 again */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x01);  /* TS out enable */
+
+    /* === Phase 1: Pre-tune prep writes (Sony lines 1729-1768)
+     * These set initial state of SLVT/SLVX registers BEFORE
+     * SetTSClockModeAndFreq. Captured byte-exact from
+     * sony_atsc1_long.log. */
+    {
+        uint8_t scratch;
+        /* SLVT 0x80 = 0x3F (RMW: read 0x28 → write 0x3F) */
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0x80, &scratch, 1);
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x80, 0x3F);
+        /* SLVT 0xA9 = read (RMW prep, no write) */
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &scratch, 1);
+        /* SLVT 0xC4 = read (RMW prep, no write) */
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xC4, &scratch, 1);
+        /* SLVT 0x81 = 0xFF (RMW: read 0xFE → write 0xFF) */
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0x81, &scratch, 1);
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x81, 0xFF);
+        (void)scratch;
+    }
+    /* SLVT bank 0x1D, 0xBF = 0x00 */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x1D, 0xBF, 0x00);
+    /* SLVX bank 0, 0x18 = 0x01 (turn ON) */
+    cxd6801_i2c_write_one(&slvx, 0x00, 0x18, 0x01);
+    /* SLVT bank 0 prep writes (initial state) */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x33);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x21);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xFE, 0x01);  /* SoftReset */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x00);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
+    /* SLVX bank 0, 0x17 = 0x01 (turn ON, gets set to 0x0F later) */
+    cxd6801_i2c_write_one(&slvx, 0x00, 0x17, 0x01);
+
+    LOG_DBG("SLtoAA1: pre-tune prep done");
+
+    /* === Phase 2: SetTSClockModeAndFreq SLVT sequence (mode 5 = ATSC 1.0)
+     * Captured byte-exact from sony_atsc1_long.log. */
     /* bank 0 + initial register set_bits */
     cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xD3, 0x01, 0x01);  /* enable bit 0 */
     cxd6801_i2c_set_bits(&dev->i2c_demod, 0x00, 0xDE, 0x00, 0x01);  /* clear bit 0 */
@@ -1010,10 +1059,8 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
     const int n = (int)(sizeof(slvr_seq) / sizeof(slvr_seq[0]));
 
     /* SLVX (extended slave at i2c=0xDC) — reg 0x17 = 0x0F before SLVR writes.
-     * Captured: i2c=0xDC bank 0 reg 0x17 = 0x0F at start of SLtoAA. */
-    cxd6801_i2c_t slvx;
-    cxd6801_i2c_init(&slvx, dev->bridge, dev->i2c_demod.chip_idx,
-                     0xDC, dev->i2c_demod.i2c_bus);
+     * Captured: i2c=0xDC bank 0 reg 0x17 = 0x0F at end of SetTSClockModeAndFreq.
+     * (slvx already initialized at top of function for prep writes.) */
     cxd6801_i2c_write_one(&slvx, 0x00, 0x17, 0x0F);
 
     /* SLVT (0xD8) bank 0 — system selector + ATSC 1.0 specific bits */
@@ -1045,6 +1092,23 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
     if (ok < n) {
         LOG_WARN("SLtoAA1: only %d/%d SLVR packets accepted", ok, n);
         return HDTVMATE_ERR_TUNE;
+    }
+
+    /* === Phase 5: atsc_Tune end-of-function reset writes
+     * (Sony lines 2200-2273). The 0x80=0x3F and 0x81=0xFF set at start
+     * of Tune get reset back to 0x80=0x28 and 0x81=0xFE. This commits
+     * the TS output config to its post-tune steady state. */
+    {
+        uint8_t scratch;
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);  /* bank 0 */
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0x80, &scratch, 1);  /* RMW */
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x80, 0x28);    /* reset */
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &scratch, 1);
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xC4, &scratch, 1);
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0x81, &scratch, 1);
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0x81, &scratch, 1);  /* read twice */
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x81, 0xFE);    /* reset */
+        (void)scratch;
     }
 
     LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete (via 0x98 proxy)");
@@ -1116,18 +1180,19 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         /* Non-fatal — continue, lock check will surface the failure */
     }
 
-    /* SetStreamOutput sequence — captured from sony_atsc1_full_capture.log:
-     *   bank 0 select (already there)
-     *   read reg 0xA9 (value discarded — sync poke)
-     *   bank 0 select (again)
-     *   write reg 0xC3 = 0x01  (ENABLE TS output for ATSC 1.0)
-     * Sony toggles 0x00/0x01 across retune cycles. Set 0x01 for streaming. */
+    /* SetStreamOutput #2 — Sony does this RIGHT BEFORE monitor_SyncStat
+     * with C3=0x00 (DISABLE TS output during lock acquisition).
+     * Captured sony_atsc1_long.log line 2333. C3 toggle pattern:
+     *   atsc_Tune start: C3=0x01 (in SLtoAA1's Phase 0 SetStreamOutput #1)
+     *   pre-lock-check:  C3=0x00 (here, SetStreamOutput #2)
+     * After lock acquired, app calls SetStreamOutput #3 with C3=0x01 to
+     * enable streaming again. */
     {
         uint8_t a9_val;
         cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);
         cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
         cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);
-        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x01);  /* ENABLE */
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);  /* DISABLE */
     }
 
     dev->state = CXD6801_STATE_ACTIVE_ATSC1;
