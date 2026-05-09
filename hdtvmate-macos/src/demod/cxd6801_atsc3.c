@@ -949,6 +949,8 @@ extern hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev);
 extern hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev);
 extern hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
                                            uint8_t reg, uint8_t val);
+extern hdtvmate_error_t br_cmd_slvr_write_masked(it9300_device_t *dev, uint8_t bank,
+                                                  uint8_t reg, uint8_t val, uint8_t mask);
 
 static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 {
@@ -1042,19 +1044,22 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
      *
      * NOT direct i2c=0xC0/0xDA writes (those went to wrong slave
      * which bridge fake-ACKed but chip never received). */
-    static const struct { uint8_t bank, reg, val; } slvr_seq[] = {
-        {0xA3, 0xA1, 0x77}, {0xA3, 0xA2, 0x77}, {0xA3, 0xA3, 0x77}, {0xA3, 0xA4, 0x27},
-        {0xA0, 0x13, 0x03},
-        {0x06, 0xA0, 0x31}, {0x06, 0xA1, 0xA5}, {0x06, 0xA2, 0x2E}, {0x06, 0xA3, 0x9F},
-        {0x06, 0xA4, 0x2B}, {0x06, 0xA5, 0x99}, {0x06, 0xA6, 0x00}, {0x06, 0xA7, 0xCD},
-        {0x06, 0xA8, 0x00}, {0x06, 0xA9, 0xCD}, {0x06, 0xAA, 0x00}, {0x06, 0xAB, 0x00},
-        {0x06, 0xAC, 0x2B}, {0x06, 0xAD, 0x9D},
-        {0xA0, 0x6F, 0x61}, {0xA0, 0x70, 0xFB}, {0xA0, 0x71, 0x7F},
-        {0x09, 0x80, 0x61}, {0x09, 0x81, 0xFB}, {0x09, 0x82, 0x7F},
-        {0xA0, 0x73, 0x26}, {0xA0, 0x74, 0x49}, {0xA0, 0x75, 0x7C},
-        {0x09, 0x83, 0x26}, {0x09, 0x84, 0x49}, {0x09, 0x85, 0x7C},
-        {0x06, 0x71, 0x05},
-        {0xA3, 0xA0, 0x10},
+    /* mask field: most writes are full-overwrite (0xFF), but 3 use partial
+     * masks for AGC/control bit RMW (verified sony_atsc1_long.log).
+     * Sending 0xFF for these would clobber bits Sony intentionally preserves. */
+    static const struct { uint8_t bank, reg, val, mask; } slvr_seq[] = {
+        {0xA3, 0xA1, 0x77, 0xFF}, {0xA3, 0xA2, 0x77, 0xFF}, {0xA3, 0xA3, 0x77, 0xFF}, {0xA3, 0xA4, 0x27, 0xFF},
+        {0xA0, 0x13, 0x03, 0x03},  /* partial mask — lower 2 bits */
+        {0x06, 0xA0, 0x31, 0xFF}, {0x06, 0xA1, 0xA5, 0xFF}, {0x06, 0xA2, 0x2E, 0xFF}, {0x06, 0xA3, 0x9F, 0xFF},
+        {0x06, 0xA4, 0x2B, 0xFF}, {0x06, 0xA5, 0x99, 0xFF}, {0x06, 0xA6, 0x00, 0xFF}, {0x06, 0xA7, 0xCD, 0xFF},
+        {0x06, 0xA8, 0x00, 0xFF}, {0x06, 0xA9, 0xCD, 0xFF}, {0x06, 0xAA, 0x00, 0xFF}, {0x06, 0xAB, 0x00, 0xFF},
+        {0x06, 0xAC, 0x2B, 0xFF}, {0x06, 0xAD, 0x9D, 0xFF},
+        {0xA0, 0x6F, 0x61, 0xFF}, {0xA0, 0x70, 0xFB, 0xFF}, {0xA0, 0x71, 0x7F, 0xFF},
+        {0x09, 0x80, 0x61, 0xFF}, {0x09, 0x81, 0xFB, 0xFF}, {0x09, 0x82, 0x7F, 0xFF},
+        {0xA0, 0x73, 0x26, 0xFF}, {0xA0, 0x74, 0x49, 0xFF}, {0xA0, 0x75, 0x7C, 0xFF},
+        {0x09, 0x83, 0x26, 0xFF}, {0x09, 0x84, 0x49, 0xFF}, {0x09, 0x85, 0x7C, 0xFF},
+        {0x06, 0x71, 0x05, 0x07},  /* partial mask — lower 3 bits */
+        {0xA3, 0xA0, 0x10, 0x10},  /* partial mask — bit 4 only */
     };
     const int n = (int)(sizeof(slvr_seq) / sizeof(slvr_seq[0]));
 
@@ -1079,7 +1084,12 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
         return ret;
     }
 
-    /* Send 33-write SLVR sequence via 0x98 proxy + CMD 0xC5 */
+    /* Send 33-write SLVR sequence via 0x98 proxy + CMD 0xC5
+     * NOTE: tried using slvr_seq[i].mask (Sony's exact masks 0x07/0x03/0x10
+     * for 3 of the 33) but produced WORSE lock behavior (bit 4 always set).
+     * Reverted to 0xFF — the SLVR proxy mask semantics may differ from
+     * what we assume. Keep mask=0xFF for now; revisit if we get more
+     * Sony lock-success traces. */
     int ok = 0;
     for (int i = 0; i < n; i++) {
         ret = br_cmd_slvr_write(dev->bridge,
@@ -1193,6 +1203,36 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
         cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);
         cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);  /* DISABLE */
+    }
+
+    /* Sony's retry pattern (sony_atsc1_long.log lines 2273-3902):
+     * After atsc_Tune ends, poll lock for ~1s. If not locked, do RE-TUNE
+     * (call tuner_tune again with same params) + SetStreamOutput
+     * disable + poll for full 5s. This second pass kicks the demod's
+     * VCO/AGC into a different state that often locks when first didn't.
+     *
+     * We skip the polling between attempts (just do back-to-back retune
+     * and let the caller's wait_lock handle the polling). Sony's pattern
+     * has ~1s between but the chip behavior is the same. */
+    LOG_DBG("ATSC1 retry: re-tune to kick demod state");
+    br_user_delay(500);
+    bool locked_early = false;
+    cxd6801_atsc1_check_lock(dev, &locked_early);
+    if (!locked_early) {
+        ret = cxd6801_tuner_tune(dev, frequency_khz, CXD6801_BW_6MHZ);
+        if (ret != HDTVMATE_OK) {
+            LOG_WARN("ATSC1 retry: tuner re-tune failed: %d", ret);
+        }
+        /* SLVR re-init + B3 query (Sony does this between retries) */
+        br_cmd_slvr_read_setup(dev->bridge);
+        /* SetStreamOutput #3 (C3=0x00 again) */
+        {
+            uint8_t a9_val;
+            cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);
+            cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xA9, &a9_val, 1);
+            cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x00, 0x00);
+            cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC3, 0x00);
+        }
     }
 
     dev->state = CXD6801_STATE_ACTIVE_ATSC1;

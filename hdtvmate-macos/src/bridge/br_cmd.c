@@ -507,21 +507,22 @@ hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
     return HDTVMATE_OK;
 }
 
-hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
-                                    uint8_t reg, uint8_t val)
+hdtvmate_error_t br_cmd_slvr_write_masked(it9300_device_t *dev, uint8_t bank,
+                                           uint8_t reg, uint8_t val, uint8_t mask)
 {
     /* Sony's exact USB CMD 0x2B payload (verified via Frida WR_GEN capture):
-     *   [len=7, bus=3, addr=0x98, 0x0A, 0xC5, bank, reg, val, 0xFF, 0x00]
+     *   [len=7, bus=3, addr=0x98, 0x0A, 0xC5, bank, reg, val, mask, 0x00]
      *
-     * len=7 covers all 7 i2c data bytes after addr (sub_addr 0x0A + 6-byte CMD packet).
-     * mbox=0 (cmd=0x002B not 0x102B). No F424 wrap, no 0x4900 footer for SLVR writes.
+     * Most writes use mask=0xFF (full overwrite). 3 specific writes use
+     * partial masks (verified sony_atsc1_long.log): RMW semantics where
+     * only bits where mask=1 are modified.
      */
     uint8_t tx[] = {
         7,             /* i2c data length (sub_addr + 6 packet bytes) */
         0x03,          /* bus 3 */
         0x98,          /* SLVR proxy i2c addr */
         0x0A,          /* sub_addr (i2c reg pointer on the proxy slave) */
-        0xC5, bank, reg, val, 0xFF, 0x00   /* 6-byte SLVR CMD packet */
+        0xC5, bank, reg, val, mask, 0x00   /* 6-byte SLVR CMD packet */
     };
     /* EXPERIMENT 2026-05-09: wrap with F424=1/0 — Sony's pattern around
      * external i2c slaves. SLVR proxy may need same treatment. */
@@ -529,9 +530,15 @@ hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
     hdtvmate_error_t ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR,
                                         tx, sizeof(tx), NULL, 0);
     br_f424_end(dev);
-    LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
-            bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
+    LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x mask=0x%02x %s",
+            bank, reg, val, mask, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
     return ret;
+}
+
+hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
+                                    uint8_t reg, uint8_t val)
+{
+    return br_cmd_slvr_write_masked(dev, bank, reg, val, 0xFF);
 }
 
 hdtvmate_error_t br_cmd_i2c_write(it9300_device_t *dev, uint8_t sub_addr,
