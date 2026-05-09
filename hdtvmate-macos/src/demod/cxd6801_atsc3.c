@@ -988,10 +988,12 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
     cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x08, 0x01);
     br_user_delay(2);
 
-    /* SlvR i2c addr verified via DRV_CXD6801_OnBoard_initialize disasm:
-     * the 4 i2c slaves on this chip are 0xD8 (SLVT), 0xDA (SLVR),
-     * 0xC0 (?), 0xC2 (TUNER). Try 0xDA first — that's documented SLVR. */
-    static const uint8_t slvr_addr_candidates[] = { 0xDA, 0xC0, 0xCC, 0xCE };
+    /* SlvR i2c addr — actually 0xC0 NOT 0xDA. Sony's I2cRepeaterEnable
+     * and SLtoAA both load i2c addr from handle->[0x5], which is the
+     * SECOND slave registered by DRV_CXD6801_OnBoard_initialize at
+     * chip_idx=0. That's 0xC0. The 0xDA we saw is for chip_idx=1
+     * (dual-chip variant — not our hardware). */
+    static const uint8_t slvr_addr_candidates[] = { 0xC0, 0xDA, 0xCC, 0xCE };
     cxd6801_i2c_t slvr_ctx;
     int best_ok = -1;
     uint8_t best_addr = 0;
@@ -1044,6 +1046,21 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
 
     /* Save SlvR addr in dev so subsequent functions can use it */
     dev->slvr_addr = best_addr;
+
+    /* CHIP MODE REGISTER: SLVT bank 0 reg 0x10 = chip operating mode.
+     * cxd6801_sleep writes 0 here (sleep). Sony's SLtoAA(5,6) sets
+     * mode 5→6 where 6 = active ATSC 1.0. Set to 6 to activate the
+     * chip's 8VSB demodulator pipeline (which then enables SLVR
+     * slave to respond with real register values).
+     *
+     * Mode enum (inferred from monitor_SyncStat handle->[0x2bc] checks):
+     *   0 = power down
+     *   2 = active ATSC 3.0
+     *   5 = sleep (when SLtoAA reads current mode)
+     *   6 = active ATSC 1.0 (SLtoAA target) */
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x10, 0x06);
+    br_user_delay(20);
+
     LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete");
     return HDTVMATE_OK;
 }

@@ -97,12 +97,12 @@ hdtvmate_error_t cxd6801_i2c_read(cxd6801_i2c_t *i2c, uint8_t bank,
     uint8_t tx_reg[64];
 
     /* Tuner access: write reg addr, then read from tuner addr+1.
-     * SLVT (0xD8) and SLVR (0xDA) are bank-based demod slaves —
-     * route them through the bank+ptr+read path below. Only true
-     * tuners (0xC2 ASCOT3, 0xC0 second slave?) use this branch. */
+     * SLVT (0xD8), SLVR (0xC0 or 0xDA — depending on chip variant)
+     * are bank-based demod slaves — route through 3-step path. */
     if (i2c->i2c_addr != CXD6801_I2C_ADDR_DEMOD &&
         i2c->i2c_addr != CXD6801_I2C_ADDR_WRITE &&
-        i2c->i2c_addr != 0xDA) {
+        i2c->i2c_addr != 0xDA &&
+        i2c->i2c_addr != 0xC0) {
         /* Write register address to tuner */
         tx_reg[0] = 1;
         tx_reg[1] = i2c->i2c_bus;
