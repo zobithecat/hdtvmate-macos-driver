@@ -55,13 +55,21 @@ hdtvmate_error_t it9300_initialize(it9300_device_t *dev, usb_device_t *usb)
      * not bridge init). Captured sequence in /tmp/sony_bridge3.log.
      */
 
-    /* === Stage 1: power-up (Sony's first writes) === */
+    /* === Stage 1: power-up + reset with Sony's exact timing ===
+     * Sony's D8B7 cycle from live capture (1778331826.331..827.378):
+     *   D8B7=01 → 206ms → D8B7=00 → 203ms → D8B7=01 → 134ms → ... → 504ms → D8B7=01
+     * Reset transitions need explicit delays (≥200ms) so the chip's
+     * analog reset circuit actually triggers. Without delays our pulse
+     * is too short and chip never resets — bridge ACKs but chip i2c
+     * subsystem stays in stale state. */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xDA05, 0x01);  /* power on */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x01);  /* GPIO up */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B8, 0x01);
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B9, 0x01);
-    /* Reset cycle */
+    br_user_delay(200);  /* Sony: 206ms before reset */
+    /* Reset pulse with Sony-matching delays */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x00);
+    br_user_delay(200);  /* Sony: 203ms low */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8B7, 0x01);
     /* Additional GPIO power up */
     it9300_write_register(dev, IT9300_PROCESSOR_LINK, 0xD8E4, 0x01);
