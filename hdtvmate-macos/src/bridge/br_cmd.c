@@ -399,21 +399,21 @@ static inline void br_f424_end(it9300_device_t *dev) {
 hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
-    /* CMD 0x2B GENERIC_I2C_WR payload format: [len, bus, addr, sub_addr, ...data]
-     * (Earlier this code lacked the `bus` byte — the bridge then mis-interpreted
-     * 0x98 as the bus number, NACKing every SLVR write while logging "OK".) */
-    /* i2c=0x98 reg 0x00 = 0x01 */
+    /* EXPERIMENT B: wrap SLVR proxy access with bridge i2c-repeater (F424).
+     * SLVT plain writes don't need this, but the chip-side SLVR proxy may
+     * route through a path that does. Path B format (no bus byte). */
+    br_f424_begin(dev);
     {
-        uint8_t tx[] = { 1, 0x03, 0x98, 0x00, 0x01 };
+        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
-        if (ret != HDTVMATE_OK) return ret;
+        if (ret != HDTVMATE_OK) { br_f424_end(dev); return ret; }
     }
-    /* i2c=0x98 reg 0x48 = 0x01 */
     {
-        uint8_t tx[] = { 1, 0x03, 0x98, 0x48, 0x01 };
+        uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
-        if (ret != HDTVMATE_OK) return ret;
+        if (ret != HDTVMATE_OK) { br_f424_end(dev); return ret; }
     }
+    br_f424_end(dev);
     return HDTVMATE_OK;
 }
 
@@ -442,16 +442,14 @@ hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
 
-    /* Step 1 — proxy re-init: even though sltoaa1 already initialized
-     * the proxy, Sony re-initializes it here before the 0xB3 query
-     * (capture lines 243-246). */
+    /* Step 1 — proxy re-init (path B format, no bus byte) */
     {
-        uint8_t tx[] = { 1, 0x03, 0x98, 0x00, 0x01 };
+        uint8_t tx[] = { 1, 0x98, 0x00, 0x01 };
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) return ret;
     }
     {
-        uint8_t tx[] = { 1, 0x03, 0x98, 0x48, 0x01 };
+        uint8_t tx[] = { 1, 0x98, 0x48, 0x01 };
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) return ret;
     }
@@ -459,12 +457,11 @@ hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
     /* Step 2 — CMD 0xB3 query packet, written to i2c=0x98 reg 0x0A. */
     {
         uint8_t pkt[6] = { 0xB3, 0x10, 0x00, 0x00, 0x00, 0x00 };
-        uint8_t tx[4 + 6];
+        uint8_t tx[3 + 6];
         tx[0] = 6;
-        tx[1] = 0x03;
-        tx[2] = 0x98;
-        tx[3] = 0x0A;
-        memcpy(&tx[4], pkt, 6);
+        tx[1] = 0x98;
+        tx[2] = 0x0A;
+        memcpy(&tx[3], pkt, 6);
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
         if (ret != HDTVMATE_OK) {
             LOG_WARN("SLVR_RD_SETUP: 0xB3 query failed: %d", ret);
@@ -472,15 +469,12 @@ hdtvmate_error_t br_cmd_slvr_read_setup(it9300_device_t *dev)
         }
     }
 
-    /* Step 3 — read back response. We need to set the chip's reg pointer
-     * to 0x0A first (write addr+sub), then issue read. Use the standard
-     * 2-stage pattern from cxd6801_i2c_read. */
+    /* Step 3 — read back response (path B format) */
     {
-        /* Set reg pointer: write [bus, 0x98, 0x0A] with no data */
-        uint8_t set_ptr[] = { 1, 0x03, 0x98, 0x0A };
+        uint8_t set_ptr[] = { 1, 0x98, 0x0A };
         br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, set_ptr, sizeof(set_ptr), NULL, 0);
 
-        uint8_t rd[] = { 6, 0x03, 0x98 };
+        uint8_t rd[] = { 6, 0x98 };
         uint8_t resp[6] = {0};
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_RD, rd, sizeof(rd), resp, sizeof(resp));
         LOG_INFO("SLVR_RD_SETUP: 0xB3 response: %02x %02x %02x %02x %02x %02x (expect 30 00 00 00 00 b3)",
@@ -495,14 +489,16 @@ hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
 {
     /* Build 6-byte CMD 0xC5 SlaveR write packet */
     uint8_t pkt[6] = { 0xC5, bank, reg, val, 0xFF, 0x00 };
-    /* USB framing: [len=6, bus, addr=0x98, sub_addr=0x0A, ...6 packet bytes] */
-    uint8_t tx[4 + 6];
+    /* USB framing path B: [len=6, addr=0x98, sub_addr=0x0A, ...6 packet bytes] */
+    uint8_t tx[3 + 6];
     tx[0] = 6;
-    tx[1] = 0x03;
-    tx[2] = 0x98;
-    tx[3] = 0x0A;
-    memcpy(&tx[4], pkt, 6);
+    tx[1] = 0x98;
+    tx[2] = 0x0A;
+    memcpy(&tx[3], pkt, 6);
+    /* EXPERIMENT B: F424 wrap (see br_cmd_slvr_init comment) */
+    br_f424_begin(dev);
     hdtvmate_error_t ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+    br_f424_end(dev);
     LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
             bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
     return ret;
