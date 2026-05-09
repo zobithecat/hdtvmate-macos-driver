@@ -250,6 +250,17 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         return ret;
     }
 
+    /* ATECC SLVR-unlock handshake — Sony runs it AFTER tuner init.
+     * Tuner init's final writes (reg 0x87=0xC0, 0x88=0x00) prime the
+     * bridge i2c master to route to ATECC slave at 0xC8. Without these
+     * tuner writes preceding ATECC, the chip's mailbox doesn't unlock. */
+    {
+        hdtvmate_error_t atecc_ret = cxd6801_atecc_unlock_slvr(dev);
+        if (atecc_ret != HDTVMATE_OK) {
+            LOG_WARN("ATECC unlock failed: %d (SLVR may stay locked)", atecc_ret);
+        }
+    }
+
     LOG_INFO("CXD6801 initialized successfully (state: SLEEP)");
     return HDTVMATE_OK;
 }

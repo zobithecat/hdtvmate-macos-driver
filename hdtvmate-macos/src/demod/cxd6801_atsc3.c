@@ -1081,16 +1081,9 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
         }
     }
 
-    /* SoftReset before mode transition */
-    cxd6801_soft_reset(dev);
-
-    /* ATECC secure-element handshake — must run BEFORE SLVR access.
-     * The chip locks i2c=0x98 (SLVR proxy) until this completes. */
-    ret = cxd6801_atecc_unlock_slvr(dev);
-    if (ret != HDTVMATE_OK) {
-        LOG_WARN("ATECC unlock failed (SLVR may stay locked): %d", ret);
-        /* Continue — sltoaa1 will surface the failure clearly */
-    }
+    /* Sony does NOT call SoftReset between chip-init and Tune. Our
+     * SoftReset (writes 0xFE=1) might clear chip's ATECC auth state,
+     * re-locking SLVR. Skip it — ATECC unlock from init should persist. */
 
     /* SLtoAA1 - sleep to active ATSC 1.0 */
     ret = cxd6801_sltoaa1(dev);

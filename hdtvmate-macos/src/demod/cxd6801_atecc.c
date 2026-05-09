@@ -103,21 +103,33 @@ static hdtvmate_error_t atecc_exec(it9300_device_t *bridge,
                                     uint32_t exec_delay_ms)
 {
     hdtvmate_error_t ret = atecc_send(bridge, cmd_data, cmd_len);
-    if (ret != HDTVMATE_OK) return ret;
+    if (ret != HDTVMATE_OK) {
+        LOG_WARN("ATECC send failed (op=0x%02x): %d", cmd_data[1], ret);
+        return ret;
+    }
 
     br_user_delay(exec_delay_ms);  /* ATECC needs time to compute */
 
-    /* Poll status — timeout after ~30ms */
-    uint8_t status = 0;
-    for (int i = 0; i < 30; i++) {
-        if (atecc_read_status(bridge, &status) == HDTVMATE_OK && status != 0xFF) break;
+    /* Poll status — Sony's captures show chip returns 0x23 when ready */
+    uint8_t status = 0xFF;
+    int polls;
+    for (polls = 0; polls < 30; polls++) {
+        ret = atecc_read_status(bridge, &status);
+        if (ret == HDTVMATE_OK && status != 0xFF && status != 0x00) break;
         br_user_delay(1);
     }
+    LOG_DBG("ATECC op=0x%02x status=0x%02x after %d polls", cmd_data[1], status, polls);
 
     /* Read response (34 bytes typical: 1 length + 32 data + 2 CRC) */
     if (resp && resp_len > 0) {
         ret = atecc_read_response(bridge, resp, resp_len);
-        if (ret != HDTVMATE_OK) return ret;
+        if (ret != HDTVMATE_OK) {
+            LOG_WARN("ATECC read resp failed (op=0x%02x): %d", cmd_data[1], ret);
+            return ret;
+        }
+        LOG_DBG("ATECC op=0x%02x resp[0..7]: %02x %02x %02x %02x %02x %02x %02x %02x",
+                cmd_data[1], resp[0], resp[1], resp[2], resp[3],
+                resp[4], resp[5], resp[6], resp[7]);
     }
 
     /* Commit idle */
@@ -135,56 +147,43 @@ hdtvmate_error_t cxd6801_atecc_unlock_slvr(cxd6801_device_t *dev)
 
     LOG_INFO("ATECC: starting SLVR unlock handshake at i2c=0xC8");
 
+    /* All ATECC commands need ~10-25ms exec time on chip side. Sony's
+     * captures show consistent ~10ms RTT. Set minimum 15ms for all to
+     * avoid early polling that returns chip-busy state. */
+    const uint32_t EXEC_DELAY = 15;
+
     /* === Step 1: Random (opcode 0x1B) ===
      * Generates 32 bytes of random — chip's RandOut. */
     {
-        uint8_t cmd[5] = { 0x07, 0x1B, 0x00, 0x00, 0x00 };  /* count=7, op=Random */
-        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, 23);  /* ~23ms exec */
-        if (ret != HDTVMATE_OK) {
-            LOG_WARN("ATECC Random failed: %d", ret);
-            return ret;
-        }
+        uint8_t cmd[5] = { 0x07, 0x1B, 0x00, 0x00, 0x00 };
+        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, EXEC_DELAY);
+        if (ret != HDTVMATE_OK) { LOG_WARN("ATECC Random failed: %d", ret); return ret; }
         LOG_DBG("ATECC Random: %02x %02x %02x %02x ...", resp[0], resp[1], resp[2], resp[3]);
     }
 
-    /* === Step 2: Nonce(mode=0, NumIn=first 20B of step 1) ===
-     * Updates TempKey on chip using NumIn + chip's internal slot.
-     * NOTE: resp from step 1 has format [length_byte, 32B data, 2B CRC].
-     *       Sony uses "data[0..19]" as NumIn. So bytes resp[1..20]. */
+    /* === Step 2: Nonce(mode=0, NumIn=first 20B of step 1) === */
     {
-        uint8_t cmd[5 + 20] = { 0x1B, 0x16, 0x00, 0x00, 0x00 };  /* count=27, op=Nonce, mode=0 */
-        memcpy(&cmd[5], &resp[1], 20);  /* NumIn = first 20B of chip's RandOut */
-        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, 7);  /* ~7ms exec */
-        if (ret != HDTVMATE_OK) {
-            LOG_WARN("ATECC Nonce failed: %d", ret);
-            return ret;
-        }
+        uint8_t cmd[5 + 20] = { 0x1B, 0x16, 0x00, 0x00, 0x00 };
+        memcpy(&cmd[5], &resp[0], 20);
+        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, EXEC_DELAY);
+        if (ret != HDTVMATE_OK) { LOG_WARN("ATECC Nonce failed: %d", ret); return ret; }
     }
 
-    /* === Step 3: MAC(mode=0x41, key=0) ===
-     * Chip computes MAC over TempKey using slot 0 key. We don't use the
-     * result — chip uses it for its own state tracking. */
+    /* === Step 3: MAC(mode=0x41, key=0) === */
     {
-        uint8_t cmd[5] = { 0x07, 0x08, 0x41, 0x00, 0x00 };  /* count=7, op=MAC, mode=0x41 */
-        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, 14);  /* ~14ms exec */
-        if (ret != HDTVMATE_OK) {
-            LOG_WARN("ATECC MAC failed: %d", ret);
-            return ret;
-        }
+        uint8_t cmd[5] = { 0x07, 0x08, 0x41, 0x00, 0x00 };
+        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, EXEC_DELAY);
+        if (ret != HDTVMATE_OK) { LOG_WARN("ATECC MAC failed: %d", ret); return ret; }
     }
 
-    /* === Step 4: Read(zone=config, 32B from offset 0) ===
-     * Reads chip identity / config zone. Final command of the unlock ritual. */
+    /* === Step 4: Read(zone=config, 32B from offset 0) === */
     {
-        uint8_t cmd[5] = { 0x07, 0x02, 0x80, 0x00, 0x00 };  /* count=7, op=Read, mode=config|32B */
-        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, 1);
-        if (ret != HDTVMATE_OK) {
-            LOG_WARN("ATECC Read failed: %d", ret);
-            return ret;
-        }
+        uint8_t cmd[5] = { 0x07, 0x02, 0x80, 0x00, 0x00 };
+        ret = atecc_exec(dev->bridge, cmd, sizeof(cmd), resp, 34, EXEC_DELAY);
+        if (ret != HDTVMATE_OK) { LOG_WARN("ATECC Read failed: %d", ret); return ret; }
         LOG_DBG("ATECC config: %02x %02x %02x %02x %02x %02x %02x %02x",
-                resp[1], resp[2], resp[3], resp[4],
-                resp[5], resp[6], resp[7], resp[8]);
+                resp[0], resp[1], resp[2], resp[3],
+                resp[4], resp[5], resp[6], resp[7]);
     }
 
     LOG_INFO("ATECC: SLVR unlock handshake complete");
