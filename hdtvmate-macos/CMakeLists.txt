@@ -26,6 +26,7 @@ add_library(hdtvmate_core STATIC
     src/demod/cxd6801_i2c_ite.c
     src/demod/cxd6801.c
     src/demod/cxd6801_atsc3.c
+    src/demod/cxd6801_atecc.c
     src/demod/cxd6801_monitor.c
     src/demod/ascot3.c
     src/scan/frequency_table.c

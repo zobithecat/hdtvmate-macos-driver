@@ -142,6 +142,12 @@ hdtvmate_error_t cxd6801_sleep(cxd6801_device_t *dev);
 hdtvmate_error_t cxd6801_shutdown(cxd6801_device_t *dev);
 hdtvmate_error_t cxd6801_soft_reset(cxd6801_device_t *dev);
 
+/* --- ATECC secure-element handshake (unlocks SLVR for ATSC 1.0 path) ---
+ * Runs the 4-command Random/Nonce/MAC/Read handshake at i2c=0xC8 that
+ * Sony's CryptoAuthLib executes during chip-init. Without this, the
+ * chip's SLVR proxy at i2c=0x98 NACKs all writes (locked by ATECC). */
+hdtvmate_error_t cxd6801_atecc_unlock_slvr(cxd6801_device_t *dev);
+
 /* --- ASCOT3 Tuner --- */
 hdtvmate_error_t cxd6801_tuner_init(cxd6801_device_t *dev);
 hdtvmate_error_t cxd6801_tuner_tune(cxd6801_device_t *dev, uint32_t frequency_khz,
