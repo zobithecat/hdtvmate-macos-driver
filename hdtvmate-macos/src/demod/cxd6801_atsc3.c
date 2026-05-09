@@ -984,7 +984,28 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 {
     hdtvmate_error_t ret;
 
-    LOG_INFO("ATSC 1.0 tune: %u kHz", frequency_khz);
+    /* IMPORTANT: Sony CXD6801 is an ATSC 3.0-only demodulator.
+     *
+     * Verified by inspecting liba3_phy_sony.so exports:
+     *   sony_cxd6801_demod_atsc1_*  →  0 functions
+     *   sony_cxd6801_demod_atsc3_*  →  39 functions
+     *   sony_cxd6801_integ_atsc1_*  →  0 functions
+     *
+     * The chip has no 8VSB demodulator hardware. ATSC 1.0 reception
+     * is physically impossible with this device, regardless of driver
+     * code. The functions below are a no-op shim to keep the API
+     * compatible — they will never produce a lock.
+     *
+     * This matters in Korea where ATSC 1.0 is still broadcast on
+     * UHF CH 14-51 (470-698 MHz). To receive Korean ATSC 1.0 you
+     * need an 8VSB-capable demodulator (LG, AverMedia, SiLabs).
+     *
+     * See memory/korea_atsc3_drm_block.md for the broader picture
+     * (Korean ATSC 3.0 is DRM-blocked, ATSC 1.0 chip-unsupported).
+     */
+    LOG_WARN("ATSC 1.0 (8VSB) tune attempted at %u kHz — Sony CXD6801 "
+             "does NOT support 8VSB demodulation; lock will fail by design",
+             frequency_khz);
 
     /* Power-cycle + re-init like ATSC 3.0 path */
     cxd6801_chip_power_cycle(dev->bridge);
