@@ -1022,46 +1022,35 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
     }
     LOG_INFO("SLtoAA1: SlvR mode entry done (addr=0x%02x)", best_addr);
 
-    /* SLVT (0xD8) side ATSC 1.0 setup — extracted from
-     * demod_atsc_Tune disassembly @ 0xe9400-0xe9598. Sony writes
-     * bank 2 register set after the SLtoAA SetTSClockModeAndFreq call.
-     *
-     * Confirmed values:
-     *   bank 2 reg 0x17 = 0x0F   (clock control)
-     *   bank 2 reg 0x2C = 0x01   (system = ATSC 1.0)
-     *   bank 2 reg 0x4B = 0x74
-     *
-     * Inferred values (matched to our previous "minimal port" stub
-     * which had these in bank 0 — Sony actually uses bank 2):
-     *   bank 2 reg 0xA9 = 0x00
-     *   bank 2 reg 0x49 = 0x00
-     *   bank 2 reg 0x18 = 0x00
-     */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x17, 0x0F);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xA9, 0x00);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x2C, 0x01);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x4B, 0x74);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x49, 0x00);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0x18, 0x00);
-
     /* Save SlvR addr in dev so subsequent functions can use it */
     dev->slvr_addr = best_addr;
 
-    /* CHIP MODE REGISTER: SLVT bank 0 reg 0x10 = chip operating mode.
-     * cxd6801_sleep writes 0 here (sleep). Sony's SLtoAA(5,6) sets
-     * mode 5→6 where 6 = active ATSC 1.0. Set to 6 to activate the
-     * chip's 8VSB demodulator pipeline (which then enables SLVR
-     * slave to respond with real register values).
+    /* SLtoAA full sequence — DISASSEMBLED from 0xe9418-0xe9580.
+     * Mix of SLVT (0xD8) and SLVR (0xC0) writes:
+     *   1. SLVR bank=0 reg=0x00 val=0x00  (bank select)
+     *   2. SLVR bank=0 reg=0x17 val=0x0F  (clock?)
+     *   3. SLVT bank=0 reg=0x00 val=0x00  (bank select)
+     *   4. SLVT bank=0 reg=0xA9 val=0x00
+     *   5. SLVT bank=0 reg=0x2C val=0x01  (system=ATSC1)
+     *   6. SLVT bank=0 reg=0x4B val=0x74
+     *   7. SLVT bank=0 reg=0x49 val=0x00
+     *   8. SLVR bank=0 reg=0x18 val=0x00
      *
-     * Mode enum (inferred from monitor_SyncStat handle->[0x2bc] checks):
-     *   0 = power down
-     *   2 = active ATSC 3.0
-     *   5 = sleep (when SLtoAA reads current mode)
-     *   6 = active ATSC 1.0 (SLtoAA target) */
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x10, 0x06);
-    br_user_delay(20);
+     * Earlier we had these wrong (SLVT bank 2). They're SLVT bank 0
+     * + a few SLVR writes. */
+    cxd6801_i2c_t slvr;
+    cxd6801_i2c_init(&slvr, dev->bridge, dev->i2c_demod.chip_idx,
+                     best_addr, dev->i2c_demod.i2c_bus);
 
-    LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete");
+    cxd6801_i2c_write_one(&slvr, 0x00, 0x17, 0x0F);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xA9, 0x00);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x2C, 0x01);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x4B, 0x74);
+    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0x49, 0x00);
+    cxd6801_i2c_write_one(&slvr, 0x00, 0x18, 0x00);
+
+    LOG_INFO("SLtoAA1: full ATSC 1.0 mode setup complete (SlvR=0x%02x)",
+             best_addr);
     return HDTVMATE_OK;
 }
 
