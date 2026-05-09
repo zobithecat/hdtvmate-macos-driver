@@ -23,6 +23,7 @@
 #include "cxd6801.h"
 #include "ascot3_tune.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern void br_user_delay(uint32_t ms);
@@ -469,6 +470,22 @@ static hdtvmate_error_t ascot3_x_tune(cxd6801_device_t *dev,
         }
         (void)param;
         (void)is_cable;
+
+        /* Env var overrides for AGC tuning experiments.
+         * Set ASCOT3_RFAGC=hh,hh,hh,hh,hh,hh,hh,hh (8 hex bytes for [0..7]) */
+        const char *env = getenv("ASCOT3_RFAGC");
+        if (env) {
+            unsigned int v[8];
+            int n = sscanf(env, "%x,%x,%x,%x,%x,%x,%x,%x",
+                           &v[0], &v[1], &v[2], &v[3],
+                           &v[4], &v[5], &v[6], &v[7]);
+            if (n == 8) {
+                for (int b = 0; b < 8; b++) rf_agc[b] = (uint8_t)v[b];
+                LOG_INFO("ASCOT3_RFAGC override: %02x %02x %02x %02x %02x %02x %02x %02x",
+                         rf_agc[0], rf_agc[1], rf_agc[2], rf_agc[3],
+                         rf_agc[4], rf_agc[5], rf_agc[6], rf_agc[7]);
+            }
+        }
 
         /* Frequency in kHz: 24-bit LITTLE-endian at positions 8-10.
          * Was 32-bit big-endian which is wrong. Verified via Frida-hooked
