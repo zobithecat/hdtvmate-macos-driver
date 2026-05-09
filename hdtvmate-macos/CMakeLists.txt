@@ -113,6 +113,10 @@ target_link_libraries(long_lock_test hdtvmate_core)
 add_executable(snr_monitor src/tools/snr_monitor.c)
 target_link_libraries(snr_monitor hdtvmate_core)
 
+# --- ATSC 1.0 30s lock register polling ---
+add_executable(atsc1_long_test src/tools/atsc1_long_test.c)
+target_link_libraries(atsc1_long_test hdtvmate_core)
+
 # Compiler flags
 target_compile_options(hdtvmate_core PRIVATE -Wall -Wextra -Wno-unused-parameter)
 
