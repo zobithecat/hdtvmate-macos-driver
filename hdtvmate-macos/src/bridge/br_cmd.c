@@ -422,16 +422,24 @@ static inline void br_f424_end(it9300_device_t *dev) {
 hdtvmate_error_t br_cmd_slvr_init(it9300_device_t *dev)
 {
     hdtvmate_error_t ret;
+    /* EXPERIMENT 2026-05-09: wrap SLVR-init writes with F424=1/0 like Sony
+     * does for tuner (0xC0) accesses. Sony's bridge3 capture shows F424
+     * toggle around external-i2c-slave accesses; SLVR proxy at 0x98 might
+     * also need it (chip-internal slave that goes via secondary i2c bus). */
     /* i2c=0x98 reg 0x00 = 0x01: payload = [len=2, bus=3, addr=0x98, 0x00, 0x01] */
     {
         uint8_t tx[] = { 2, 0x03, 0x98, 0x00, 0x01 };
+        br_f424_begin(dev);
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        br_f424_end(dev);
         if (ret != HDTVMATE_OK) return ret;
     }
     /* i2c=0x98 reg 0x48 = 0x01 */
     {
         uint8_t tx[] = { 2, 0x03, 0x98, 0x48, 0x01 };
+        br_f424_begin(dev);
         ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR, tx, sizeof(tx), NULL, 0);
+        br_f424_end(dev);
         if (ret != HDTVMATE_OK) return ret;
     }
     return HDTVMATE_OK;
@@ -515,8 +523,12 @@ hdtvmate_error_t br_cmd_slvr_write(it9300_device_t *dev, uint8_t bank,
         0x0A,          /* sub_addr (i2c reg pointer on the proxy slave) */
         0xC5, bank, reg, val, 0xFF, 0x00   /* 6-byte SLVR CMD packet */
     };
+    /* EXPERIMENT 2026-05-09: wrap with F424=1/0 — Sony's pattern around
+     * external i2c slaves. SLVR proxy may need same treatment. */
+    br_f424_begin(dev);
     hdtvmate_error_t ret = br_cmd_send(dev, IT9300_CMD_GENERIC_I2C_WR,
                                         tx, sizeof(tx), NULL, 0);
+    br_f424_end(dev);
     LOG_DBG("SLVR_W bank=0x%02x reg=0x%02x val=0x%02x %s",
             bank, reg, val, (ret == HDTVMATE_OK) ? "OK" : "FAIL");
     return ret;

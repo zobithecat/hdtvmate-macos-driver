@@ -187,10 +187,9 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x50; tx[4]=0x00;
         br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
 
-        /* SLVX reg 0x90 = 0x00 (conditional in Sony code, include it) */
-        tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x90; tx[4]=0x00;
-        br_cmd_send(dev->bridge, 0x002B, tx, 5, NULL, 0);
-        br_user_delay(2);
+        /* NOTE: Sony does NOT write SLVX 0x90 — verified via Frida capture
+         * sony_atsc1_long.log line 138 (chip-init goes straight 0x50 → 0x10).
+         * Earlier code had 0x90=0 from Ghidra decompile but live trace overrides. */
 
         /* SLVX reg 0x10 = 0x00 */
         tx[0]=2; tx[1]=CXD6801_I2C_BUS; tx[2]=CXD6801_I2C_ADDR_READ; tx[3]=0x10; tx[4]=0x00;
@@ -260,16 +259,39 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         return ret;
     }
 
-    /* ATECC chip-presence check (verified diagnostic, not auth). */
+    /* Sony's TAIL of chip-init — exact order from live Frida capture
+     * (sony_atsc1_long.log lines 264-268, INSIDE DRV_CXD6801_initialize).
+     * Sony uses read-modify-write pattern: each C4/E4 write is preceded
+     * by a READ (for set-and-save-bits semantics). The read returns
+     * current value but Sony just writes the target. We replicate the
+     * read so the chip's RMW state machine sees the same i2c traffic.
+     *
+     *   SLVX 0x08 = 0       ← CLOSE subsystem (was opened in XtoSL)
+     *   SLVT bank 0 reg 0xC4 (read) → write 0xA9
+     *   SLVT bank 2 reg 0xE4 (read) → write 0x00
+     *   SLVT bank 0 reg 0xC4 (read) → write 0xA1
+     */
     {
-        hdtvmate_error_t atecc_ret = cxd6801_atecc_unlock_slvr(dev);
-        if (atecc_ret != HDTVMATE_OK) {
-            LOG_WARN("ATECC chip-status check failed: %d", atecc_ret);
-        }
+        cxd6801_i2c_t slvx;
+        cxd6801_i2c_init(&slvx, dev->bridge, dev->i2c_demod.chip_idx,
+                         0xDC, dev->i2c_demod.i2c_bus);
+        cxd6801_i2c_write_one(&slvx, 0x00, 0x08, 0x00);  /* close subsystem */
+    }
+    {
+        uint8_t scratch;
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xC4, &scratch, 1);  /* RMW read */
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA9);
+        cxd6801_i2c_read(&dev->i2c_demod, 0x02, 0xE4, &scratch, 1);  /* RMW read */
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xE4, 0x00);
+        cxd6801_i2c_read(&dev->i2c_demod, 0x00, 0xC4, &scratch, 1);  /* RMW read */
+        cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA1);
+        (void)scratch;
     }
 
-    /* Sony's bridge DA-range burst (after ATECC, before final SLVT writes).
-     * Captured at 1778331828.192-215. Configures i2c master timing. */
+    /* Sony's bridge DA-range burst — POST chip-init, PRE ATECC.
+     * Captured 2026-05-09 at sony_atsc1_long.log lines 269-278.
+     * Critical: order changed from earlier code. Now matches Sony's
+     * exact sequencing (chip-init end → DA-burst → ATECC). */
     {
         struct { uint16_t addr; uint8_t val; } da_writes[] = {
             { 0xDA34, 0x01 }, { 0xDA58, 0x00 }, { 0xDA51, 0xBC },
@@ -283,26 +305,14 @@ hdtvmate_error_t cxd6801_initialize(cxd6801_device_t *dev)
         }
     }
 
-    /* Sony's TAIL of chip-init — exact order from live Frida capture:
-     *
-     *   SLVX 0x08 = 0       ← CLOSE subsystem (was opened in XtoSL)
-     *   SLVT bank 0 reg 0xC4 = 0xA9
-     *   SLVT bank 2 reg 0xE4 = 0x00
-     *   SLVT bank 0 reg 0xC4 = 0xA1
-     *
-     * The SLVX 0x08 toggle wraps tuner-init + ATECC. Closing it BEFORE
-     * the C4=A9/E4=0/C4=A1 writes is part of the SLVR-enable sequence —
-     * the chip's secondary demod state machine watches for this exact
-     * close-then-program transition. */
+    /* ATECC handshake — Sony does this AFTER DA-range bridge burst.
+     * Re-ordered 2026-05-09 to match live capture. */
     {
-        cxd6801_i2c_t slvx;
-        cxd6801_i2c_init(&slvx, dev->bridge, dev->i2c_demod.chip_idx,
-                         0xDC, dev->i2c_demod.i2c_bus);
-        cxd6801_i2c_write_one(&slvx, 0x00, 0x08, 0x00);  /* close subsystem */
+        hdtvmate_error_t atecc_ret = cxd6801_atecc_unlock_slvr(dev);
+        if (atecc_ret != HDTVMATE_OK) {
+            LOG_WARN("ATECC chip-status check failed: %d", atecc_ret);
+        }
     }
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA9);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x02, 0xE4, 0x00);
-    cxd6801_i2c_write_one(&dev->i2c_demod, 0x00, 0xC4, 0xA1);
 
     LOG_INFO("CXD6801 initialized successfully (state: SLEEP)");
     return HDTVMATE_OK;
