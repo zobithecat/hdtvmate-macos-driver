@@ -444,14 +444,29 @@ static hdtvmate_error_t ascot3_x_tune(cxd6801_device_t *dev,
          * almost every position. Real fix would be to reverse-engineer the full
          * X_tune algorithm from the binary, but this validates whether a correct
          * X_tune burst is what we needed. */
+        /* Mode-specific bytes 4-7 (verified via Frida sony_atsc1_long.log).
+         *   ATSC 3.0 (tvSystem=0): 0x22 0x00 0x18 0x1D
+         *   ATSC 1.0 (tvSystem=9): 0x23 0x00 0x1A 0x1D (first-attempt mode A)
+         *
+         * Sony actually does TWO atsc_Tune attempts per acquireChannel:
+         *   attempt 1: byte4=0x23, bytes 6-7 = 0x1A 0x1D
+         *   attempt 2: byte4=0x22, bytes 6-7 = 0x18 0x1D (fallback)
+         * We use attempt-1 values for ATSC 1.0 since 8VSB demod prefers it. */
         rf_agc[0] = 0x00;
         rf_agc[1] = 0x88;
         rf_agc[2] = 0x00;
         rf_agc[3] = 0x0B;
-        rf_agc[4] = 0x22;
-        rf_agc[5] = 0x00;
-        rf_agc[6] = 0x18;
-        rf_agc[7] = 0x1D;
+        if (tv_system == 9) {  /* ATSC 1.0 (8VSB) */
+            rf_agc[4] = 0x23;
+            rf_agc[5] = 0x00;
+            rf_agc[6] = 0x1A;
+            rf_agc[7] = 0x1D;
+        } else {  /* ATSC 3.0 (default) */
+            rf_agc[4] = 0x22;
+            rf_agc[5] = 0x00;
+            rf_agc[6] = 0x18;
+            rf_agc[7] = 0x1D;
+        }
         (void)param;
         (void)is_cable;
 
