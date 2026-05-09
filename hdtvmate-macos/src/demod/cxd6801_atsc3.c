@@ -980,11 +980,11 @@ static hdtvmate_error_t cxd6801_sltoaa1(cxd6801_device_t *dev)
     };
     int n = sizeof(slvr_seq) / sizeof(slvr_seq[0]);
 
-    /* Try multiple I2C addrs for SlvR — SLVT is 0xD8, SlvR is at a
-     * different addr that we haven't disassembled yet. Try the common
-     * candidates: 0xDA, 0xDC, 0xDE. The first one that gets ACKs on
-     * all writes is the right one. */
-    static const uint8_t slvr_addr_candidates[] = { 0xDA, 0xDC, 0xDE };
+    /* SLVR i2c addr candidates. SetRegBits trace showed 0xC0 used
+     * (a1=192=0xC0) — that's likely SLVR. 0xDA passed write ACK
+     * but read returned USB seq echo (chip didn't respond), so
+     * 0xDA is wrong despite ACK. */
+    static const uint8_t slvr_addr_candidates[] = { 0xC0, 0xCC, 0xCE, 0xDA };
     cxd6801_i2c_t slvr_ctx;
     int best_ok = -1;
     uint8_t best_addr = 0;
@@ -1103,18 +1103,51 @@ hdtvmate_error_t cxd6801_atsc1_tune(cxd6801_device_t *dev, uint32_t frequency_kh
 
 hdtvmate_error_t cxd6801_atsc1_check_lock(cxd6801_device_t *dev, bool *locked)
 {
-    uint8_t data = 0;
-    hdtvmate_error_t ret;
-
+    /* Extracted from disassembly of sony_cxd6801_demod_atsc_monitor_SyncStat
+     * (@ 0xf5df4) which CheckTSLock uses internally:
+     *
+     *   read SLVR bank 0xF reg 0x11 → bit 0 = ts_valid (out0)
+     *   read SLVR bank 0x9 reg 0x62 → bit 4 = unlock_detector (out1)
+     *                                bit 6 (inverted) = early_unlock (out3)
+     *   read SLVR bank 0xD reg 0x86 → bit 0 = ts_lock (out2)
+     *
+     * CheckTSLock:
+     *   if (out1 != 0)               → unlock (return 0 lock=0)
+     *   else if (out2 != 0 && [+0x2a7] != 0) → check out3 → partial
+     *   else                         → locked (lock=1)
+     *
+     * Reads from SLVR (0xDA), not SLVT (0xD8). */
     *locked = false;
 
-    /* TODO: ATSC 1.0 lock check register from Ghidra
-     * sony_cxd6801_integ_atsc_WaitTSLock()
-     */
-    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x20, 0x10, &data, 1);
+    if (!dev->slvr_addr) {
+        /* SLVR addr not yet discovered — sltoaa1 must run first */
+        return HDTVMATE_ERR_TUNE;
+    }
+
+    /* Try SLVR via SLVT (0xD8) since "SLVR addr" 0xC0/0xDA gave only
+     * USB seq echo (chip didn't respond). SlvR write also went via
+     * 0xC0 with 33 ACKs but those might have been bridge-only ACKs.
+     * Maybe SLVR banks are accessible from SLVT after some context
+     * switch. Try SLVT (which we know works) for the lock registers. */
+    uint8_t reg_F_11 = 0, reg_9_62 = 0, reg_D_86 = 0;
+    hdtvmate_error_t ret;
+
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x0F, 0x11, &reg_F_11, 1);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x09, 0x62, &reg_9_62, 1);
+    if (ret != HDTVMATE_OK) return ret;
+    ret = cxd6801_i2c_read(&dev->i2c_demod, 0x0D, 0x86, &reg_D_86, 1);
     if (ret != HDTVMATE_OK) return ret;
 
-    *locked = (data & 0x07) == 0x07;
+    uint8_t ts_valid     = reg_F_11 & 0x01;
+    uint8_t unlock_det   = (reg_9_62 >> 4) & 0x01;
+    uint8_t ts_lock      = reg_D_86 & 0x01;
+
+    LOG_DBG("ATSC 1.0 lock: F.11=0x%02x (valid=%d) 9.62=0x%02x (unlock=%d) D.86=0x%02x (lock=%d)",
+            reg_F_11, ts_valid, reg_9_62, unlock_det, reg_D_86, ts_lock);
+
+    /* Locked = no unlock detected + ts_lock asserted */
+    *locked = (unlock_det == 0) && (ts_lock != 0);
     return HDTVMATE_OK;
 }
 
