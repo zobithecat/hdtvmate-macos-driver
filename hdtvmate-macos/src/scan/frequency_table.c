@@ -50,7 +50,11 @@ static const atsc_frequency_t us_atsc_frequencies[] = {
     {35, 599000, "UHF"},
     {36, 605000, "UHF"},
 
-    /* Extended UHF (Channels 37-51, some still in use) */
+    /* Extended UHF (Channels 37-51, some still in use)
+     * NOTE: CH 37 (608-614 MHz) is reserved for radio astronomy in US/Canada
+     * but is USABLE for TV broadcast in Korea (KASI uses different bands).
+     * Include for completeness — empty in US, may have signal in KR. */
+    {37, 611000, "UHF"},
     {38, 617000, "UHF"},
     {39, 623000, "UHF"},
     {40, 629000, "UHF"},
